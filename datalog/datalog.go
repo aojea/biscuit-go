@@ -256,8 +256,8 @@ func (r Rule) variables() MatchedVariables {
 // apply derives the facts of the rule from the visible facts and calls emit
 // for each, with its origin: the origins of the matched facts plus blockID,
 // the block the rule belongs to.
-func (r Rule) apply(blockID BlockID, facts []factWithOrigin, syms *SymbolTable, emit func(Origin, Fact)) error {
-	for res := range combine(r.variables(), r.Body, r.Expressions, facts, syms) {
+func (r Rule) apply(blockID BlockID, facts []factWithOrigin, syms *SymbolTable, externs ExternFuncs, emit func(Origin, Fact)) error {
+	for res := range combine(r.variables(), r.Body, r.Expressions, facts, syms, externs) {
 		if res.err != nil {
 			return res.err
 		}
@@ -356,6 +356,13 @@ var (
 
 type WorldOption func(w *World)
 
+// WithExternFuncs registers the functions that extern::name calls resolve to.
+func WithExternFuncs(externs ExternFuncs) WorldOption {
+	return func(w *World) {
+		w.externs = externs
+	}
+}
+
 func WithMaxFacts(maxFacts int) WorldOption {
 	return func(w *World) {
 		w.runLimits.maxFacts = maxFacts
@@ -399,6 +406,7 @@ type World struct {
 	rules []scopedRule
 
 	runLimits runLimits
+	externs   ExternFuncs
 }
 
 func NewWorld(opts ...WorldOption) *World {
@@ -511,7 +519,7 @@ func (w *World) Run(syms *SymbolTable) error {
 						return
 					default:
 						visible := w.visibleFacts(sr.trusted)
-						err := sr.rule.apply(sr.blockID, visible, syms, func(origin Origin, f Fact) {
+						err := sr.rule.apply(sr.blockID, visible, syms, w.externs, func(origin Origin, f Fact) {
 							newFacts = append(newFacts, factWithOrigin{origin, f})
 						})
 						if err != nil {
@@ -581,7 +589,7 @@ func (w *World) Query(trusted TrustedOrigins, pred Predicate) *FactSet {
 // non-match.
 func (w *World) QueryRule(rule Rule, blockID BlockID, trusted TrustedOrigins, syms *SymbolTable) (*FactSet, error) {
 	newFacts := &FactSet{}
-	err := rule.apply(blockID, w.visibleFacts(trusted), syms, func(_ Origin, f Fact) {
+	err := rule.apply(blockID, w.visibleFacts(trusted), syms, w.externs, func(_ Origin, f Fact) {
 		newFacts.Insert(f)
 	})
 	if err != nil {
@@ -598,7 +606,7 @@ func (w *World) QueryMatchAll(rule Rule, trusted TrustedOrigins, syms *SymbolTab
 	// would filter the matches instead of reporting those that fail.
 	found := false
 	passed := true
-	for res := range combine(rule.variables(), rule.Body, nil, w.visibleFacts(trusted), syms) {
+	for res := range combine(rule.variables(), rule.Body, nil, w.visibleFacts(trusted), syms, w.externs) {
 		if res.err != nil {
 			return false, res.err
 		}
@@ -608,7 +616,7 @@ func (w *World) QueryMatchAll(rule Rule, trusted TrustedOrigins, syms *SymbolTab
 			continue
 		}
 		for _, e := range rule.Expressions {
-			v, err := e.Evaluate(res.vars, syms)
+			v, err := e.EvaluateWith(res.vars, syms, w.externs)
 			if err != nil {
 				return false, err
 			}
@@ -630,6 +638,7 @@ func (w *World) Clone() *World {
 		facts:     facts,
 		rules:     slices.Clone(w.rules),
 		runLimits: w.runLimits,
+		externs:   w.externs,
 	}
 }
 
@@ -672,7 +681,7 @@ type match struct {
 // combine enumerates the bindings of variables for which every predicate
 // matches a fact and every expression holds. It sends the bindings on the
 // returned channel and closes it; the caller must drain it.
-func combine(variables MatchedVariables, predicates []Predicate, expressions []Expression, facts []factWithOrigin, syms *SymbolTable) <-chan match {
+func combine(variables MatchedVariables, predicates []Predicate, expressions []Expression, facts []factWithOrigin, syms *SymbolTable, externs ExternFuncs) <-chan match {
 	c := make(chan match)
 
 	go func() {
@@ -741,7 +750,7 @@ func combine(variables MatchedVariables, predicates []Predicate, expressions []E
 				if complete_vars := vars.Complete(); complete_vars != nil {
 					valid := true
 					for _, e := range expressions {
-						res, err := e.Evaluate(complete_vars, syms)
+						res, err := e.EvaluateWith(complete_vars, syms, externs)
 						if err != nil {
 							c <- match{origin, complete_vars, err}
 							return
