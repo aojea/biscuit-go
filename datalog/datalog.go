@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -222,24 +223,26 @@ func (e InvalidRuleError) Error() string {
 	return fmt.Sprintf("datalog: variable %d in head is missing from body and/or constraints", e.MissingVariable)
 }
 
-func (r Rule) Apply(facts *FactSet, newFacts *FactSet, syms *SymbolTable) error {
-	// extract all variables from the rule body
+// variables lists the variables of the body, unbound.
+func (r Rule) variables() MatchedVariables {
 	variables := make(MatchedVariables)
 	for _, predicate := range r.Body {
 		for _, term := range predicate.Terms {
-			v, ok := term.(Variable)
-			if !ok {
-				continue
+			if v, ok := term.(Variable); ok {
+				variables[v] = nil
 			}
-			variables[v] = nil
 		}
 	}
+	return variables
+}
 
-	combinations := combine(variables, r.Body, r.Expressions, facts, syms)
-
-	for res := range combinations {
-		if res.error != nil {
-			return res.error
+// apply derives the facts of the rule from the visible facts and calls emit
+// for each, with its origin: the origins of the matched facts plus blockID,
+// the block the rule belongs to.
+func (r Rule) apply(blockID BlockID, facts []factWithOrigin, syms *SymbolTable, emit func(Origin, Fact)) error {
+	for res := range combine(r.variables(), r.Body, r.Expressions, facts, syms) {
+		if res.err != nil {
+			return res.err
 		}
 
 		predicate := r.Head.Clone()
@@ -248,14 +251,14 @@ func (r Rule) Apply(facts *FactSet, newFacts *FactSet, syms *SymbolTable) error 
 			if !ok {
 				continue
 			}
-			v, ok := res.MatchedVariables[k]
+			v, ok := res.vars[k]
 			if !ok {
 				return InvalidRuleError{r, k}
 			}
 
 			predicate.Terms[i] = *v
 		}
-		newFacts.Insert(Fact{predicate})
+		emit(res.origin.With(blockID), Fact{predicate})
 	}
 
 	return nil
@@ -352,16 +355,35 @@ func WithMaxDuration(maxDuration time.Duration) WorldOption {
 	}
 }
 
+type factWithOrigin struct {
+	origin Origin
+	fact   Fact
+}
+
+// originFacts is the set of facts sharing one origin.
+type originFacts struct {
+	origin Origin
+	facts  FactSet
+}
+
+type scopedRule struct {
+	blockID BlockID
+	trusted TrustedOrigins
+	rule    Rule
+}
+
+// World holds the facts and rules of an authorization, each fact with the
+// origin it derives from and each rule with the origins it trusts.
 type World struct {
-	facts *FactSet
-	rules []Rule
+	// facts is kept sorted by origin so that iteration is deterministic.
+	facts []originFacts
+	rules []scopedRule
 
 	runLimits runLimits
 }
 
 func NewWorld(opts ...WorldOption) *World {
 	w := &World{
-		facts:     &FactSet{},
 		runLimits: defaultRunLimits,
 	}
 
@@ -372,26 +394,86 @@ func NewWorld(opts ...WorldOption) *World {
 	return w
 }
 
-func (w *World) AddFact(f Fact) {
-	w.facts.Insert(f)
+// AddFact adds a fact stated by the blocks of origin. Returns false when the
+// world already had it under that origin.
+func (w *World) AddFact(origin Origin, f Fact) bool {
+	i, found := slices.BinarySearchFunc(w.facts, origin, func(of originFacts, o Origin) int {
+		return of.origin.Compare(o)
+	})
+	if !found {
+		w.facts = slices.Insert(w.facts, i, originFacts{origin: origin.With()})
+	}
+	return w.facts[i].facts.Insert(f)
 }
 
-func (w *World) Facts() *FactSet {
-	return w.facts
+// Facts returns the facts of the world grouped by origin, in origin order.
+func (w *World) Facts() []OriginFacts {
+	res := make([]OriginFacts, 0, len(w.facts))
+	for _, of := range w.facts {
+		if len(of.facts) == 0 {
+			continue
+		}
+		facts := make(FactSet, len(of.facts))
+		copy(facts, of.facts)
+		res = append(res, OriginFacts{Origin: of.origin.With(), Facts: facts})
+	}
+	return res
 }
 
-func (w *World) AddRule(r Rule) {
-	w.rules = append(w.rules, r)
+// OriginFacts is a group of facts sharing an origin.
+type OriginFacts struct {
+	Origin Origin
+	Facts  FactSet
+}
+
+func (w *World) factCount() int {
+	n := 0
+	for _, of := range w.facts {
+		n += len(of.facts)
+	}
+	return n
+}
+
+// visibleFacts flattens the facts whose origin is trusted.
+func (w *World) visibleFacts(trusted TrustedOrigins) []factWithOrigin {
+	var res []factWithOrigin
+	for _, of := range w.facts {
+		if !trusted.Contains(of.origin) {
+			continue
+		}
+		for _, f := range of.facts {
+			res = append(res, factWithOrigin{origin: of.origin, fact: f})
+		}
+	}
+	return res
+}
+
+// AddRule adds a rule from block blockID, reading the facts of the trusted
+// origins.
+func (w *World) AddRule(blockID BlockID, trusted TrustedOrigins, r Rule) {
+	w.rules = append(w.rules, scopedRule{blockID: blockID, trusted: trusted.With(), rule: r})
 }
 
 func (w *World) ResetRules() {
-	w.rules = make([]Rule, 0)
+	w.rules = nil
 }
 
-func (w *World) Rules() []Rule {
-	return w.rules
+// BlockRule is a rule with the block it belongs to.
+type BlockRule struct {
+	BlockID BlockID
+	Rule    Rule
 }
 
+// Rules returns the rules of the world with their block, in insertion order.
+func (w *World) Rules() []BlockRule {
+	res := make([]BlockRule, len(w.rules))
+	for i, sr := range w.rules {
+		res[i] = BlockRule{BlockID: sr.blockID, Rule: sr.rule}
+	}
+	return res
+}
+
+// Run applies the rules until no new fact appears or a limit is reached.
 func (w *World) Run(syms *SymbolTable) error {
 	done := make(chan error)
 	ctx, cancel := context.WithTimeout(context.Background(), w.runLimits.maxDuration)
@@ -403,23 +485,29 @@ func (w *World) Run(syms *SymbolTable) error {
 			case <-ctx.Done():
 				return
 			default:
-				var newFacts FactSet
-				for _, r := range w.rules {
+				var newFacts []factWithOrigin
+				for _, sr := range w.rules {
 					select {
 					case <-ctx.Done():
 						return
 					default:
-						if err := r.Apply(w.facts, &newFacts, syms); err != nil {
+						visible := w.visibleFacts(sr.trusted)
+						err := sr.rule.apply(sr.blockID, visible, syms, func(origin Origin, f Fact) {
+							newFacts = append(newFacts, factWithOrigin{origin, f})
+						})
+						if err != nil {
 							done <- err
 							return
 						}
 					}
 				}
 
-				prevCount := len(*w.facts)
-				w.facts.InsertAll([]Fact(newFacts))
+				prevCount := w.factCount()
+				for _, nf := range newFacts {
+					w.AddFact(nf.origin, nf.fact)
+				}
 
-				newCount := len(*w.facts)
+				newCount := w.factCount()
 				if newCount >= w.runLimits.maxFacts {
 					done <- ErrWorldRunLimitMaxFacts
 					return
@@ -443,25 +531,19 @@ func (w *World) Run(syms *SymbolTable) error {
 	}
 }
 
-func (w *World) Query(pred Predicate) *FactSet {
+// Query returns the facts of the trusted origins matching the predicate,
+// where a variable matches any term.
+func (w *World) Query(trusted TrustedOrigins, pred Predicate) *FactSet {
 	res := &FactSet{}
-	for _, f := range *w.facts {
-		if f.Name != pred.Name {
-			continue
-		}
-
-		// if the predicate has a different number of IDs
-		// the fact must not match
-		if len(f.Terms) != len(pred.Terms) {
+	for _, fo := range w.visibleFacts(trusted) {
+		f := fo.fact
+		if f.Name != pred.Name || len(f.Terms) != len(pred.Terms) {
 			continue
 		}
 
 		matches := true
 		for i := 0; i < len(pred.Terms); i++ {
-			fID := f.Terms[i]
-			pID := pred.Terms[i]
-
-			if pID.Type() != TermTypeVariable && !fID.Equal(pID) {
+			if pID := pred.Terms[i]; pID.Type() != TermTypeVariable && !f.Terms[i].Equal(pID) {
 				matches = false
 				break
 			}
@@ -474,36 +556,32 @@ func (w *World) Query(pred Predicate) *FactSet {
 	return res
 }
 
-// QueryRule returns the facts the rule derives from the world. An error from
-// an expression (overflow, division by zero, type mismatch) is returned
-// rather than treated as a non-match.
-func (w *World) QueryRule(rule Rule, syms *SymbolTable) (*FactSet, error) {
+// QueryRule returns the facts the rule, from block blockID, derives from the
+// facts of the trusted origins. An error from an expression (overflow,
+// division by zero, type mismatch) is returned rather than treated as a
+// non-match.
+func (w *World) QueryRule(rule Rule, blockID BlockID, trusted TrustedOrigins, syms *SymbolTable) (*FactSet, error) {
 	newFacts := &FactSet{}
-	if err := rule.Apply(w.facts, newFacts, syms); err != nil {
+	err := rule.apply(blockID, w.visibleFacts(trusted), syms, func(_ Origin, f Fact) {
+		newFacts.Insert(f)
+	})
+	if err != nil {
 		return nil, err
 	}
 	return newFacts, nil
 }
 
 // QueryMatchAll reports whether the body of the rule matches at least once
-// and its expressions hold for every match (the semantics of `check all`).
-func (w *World) QueryMatchAll(rule Rule, syms *SymbolTable) (bool, error) {
-	variables := make(MatchedVariables)
-	for _, predicate := range rule.Body {
-		for _, term := range predicate.Terms {
-			if v, ok := term.(Variable); ok {
-				variables[v] = nil
-			}
-		}
-	}
-
+// in the facts of the trusted origins and its expressions hold for every
+// match (the semantics of `check all`).
+func (w *World) QueryMatchAll(rule Rule, trusted TrustedOrigins, syms *SymbolTable) (bool, error) {
 	// The expressions are evaluated here rather than passed to combine, which
 	// would filter the matches instead of reporting those that fail.
 	found := false
 	passed := true
-	for res := range combine(variables, rule.Body, nil, w.facts, syms) {
-		if res.error != nil {
-			return false, res.error
+	for res := range combine(rule.variables(), rule.Body, nil, w.visibleFacts(trusted), syms) {
+		if res.err != nil {
+			return false, res.err
 		}
 		found = true
 		if !passed {
@@ -511,7 +589,7 @@ func (w *World) QueryMatchAll(rule Rule, syms *SymbolTable) (bool, error) {
 			continue
 		}
 		for _, e := range rule.Expressions {
-			v, err := e.Evaluate(res.MatchedVariables, syms)
+			v, err := e.Evaluate(res.vars, syms)
 			if err != nil {
 				return false, err
 			}
@@ -525,11 +603,13 @@ func (w *World) QueryMatchAll(rule Rule, syms *SymbolTable) (bool, error) {
 }
 
 func (w *World) Clone() *World {
-	newFacts := new(FactSet)
-	*newFacts = *w.facts
+	facts := make([]originFacts, len(w.facts))
+	for i, of := range w.facts {
+		facts[i] = originFacts{origin: of.origin.With(), facts: slices.Clone(of.facts)}
+	}
 	return &World{
-		facts:     newFacts,
-		rules:     append([]Rule{}, w.rules...),
+		facts:     facts,
+		rules:     slices.Clone(w.rules),
 		runLimits: w.runLimits,
 	}
 }
@@ -562,40 +642,41 @@ func (m MatchedVariables) Clone() MatchedVariables {
 	return res
 }
 
-func combine(variables MatchedVariables, predicates []Predicate, expressions []Expression, facts *FactSet, syms *SymbolTable) <-chan struct {
-	MatchedVariables
-	error
-} {
-	c := make(chan struct {
-		MatchedVariables
-		error
-	})
+// match is one binding of the variables of a rule body, with the origin of
+// the facts it was built from.
+type match struct {
+	origin Origin
+	vars   MatchedVariables
+	err    error
+}
 
-	go func(c chan struct {
-		MatchedVariables
-		error
-	}) {
+// combine enumerates the bindings of variables for which every predicate
+// matches a fact and every expression holds. It sends the bindings on the
+// returned channel and closes it; the caller must drain it.
+func combine(variables MatchedVariables, predicates []Predicate, expressions []Expression, facts []factWithOrigin, syms *SymbolTable) <-chan match {
+	c := make(chan match)
+
+	go func() {
 		defer close(c)
 
 		current := 0
 		indexes := make([]int, len(predicates))
-		//fmt.Printf("combine variables %+v preds %+v exp %+v facts %+v indexes %+v\n", variables, predicates, expressions, *facts, indexes)
 
 		// cannot apply a rule on an empty list of facts
-		if len(predicates) > 0 && len(*facts) == 0 {
+		if len(predicates) > 0 && len(facts) == 0 {
 			return
 		}
 
 		// main loop
 		for {
-			if len(predicates) > 0 && len(*facts) > 0 {
+			if len(predicates) > 0 && len(facts) > 0 {
 				// look for the next matching set of facts
 				// current indicates which predicate we are looking at, and indexes contains
 				// a list of indexes in the facts list, for each predicate
 				// when we are done looking at a set of facts, the last index is incremented
 				// and if that one reached the max number of facts, the previous one, etc
 				for {
-					if (*facts)[indexes[current]].Match(predicates[current]) {
+					if facts[indexes[current]].fact.Match(predicates[current]) {
 						if current == len(predicates)-1 {
 							// extract and check variables, check expressions, send variables
 							break
@@ -605,7 +686,7 @@ func combine(variables MatchedVariables, predicates []Predicate, expressions []E
 					} else {
 						// did not match, we either increase the current index or the previous one
 						// then we check again for a match
-						if !advanceIndexes(&current, &indexes, facts) {
+						if !advanceIndexes(&current, &indexes, len(facts)) {
 							return
 						}
 					}
@@ -614,12 +695,13 @@ func combine(variables MatchedVariables, predicates []Predicate, expressions []E
 
 			// extract and check variables, check expressions, send variables
 			var vars = variables.Clone()
+			var origin Origin
 			var matching = true
 
 		match:
 			for i, pred := range predicates {
-				fact := (*facts)[indexes[i]]
-				//fmt.Printf("evaluating predicate(%d) %+v with fact %+v\n", i, pred, fact)
+				fo := facts[indexes[i]]
+				origin = origin.Union(fo.origin)
 
 				for j := 0; j < len(pred.Terms); j++ {
 					term := pred.Terms[j]
@@ -627,7 +709,7 @@ func combine(variables MatchedVariables, predicates []Predicate, expressions []E
 					if !ok {
 						continue
 					}
-					v := fact.Terms[j]
+					v := fo.fact.Terms[j]
 					if !vars.Insert(k, v) {
 						matching = false
 						break match
@@ -636,19 +718,13 @@ func combine(variables MatchedVariables, predicates []Predicate, expressions []E
 				}
 			}
 
-			//fmt.Printf("evaluating indexes %+v with extracted variables %+v, matching = %+v\n", indexes, variables, matching)
 			if matching {
 				if complete_vars := vars.Complete(); complete_vars != nil {
-					//fmt.Printf("variables are complete, evaluating expressions\n")
 					valid := true
 					for _, e := range expressions {
 						res, err := e.Evaluate(complete_vars, syms)
 						if err != nil {
-							c <- struct {
-								MatchedVariables
-								error
-							}{complete_vars, err}
-
+							c <- match{origin, complete_vars, err}
 							return
 						}
 						if !res.Equal(Bool(true)) {
@@ -658,11 +734,7 @@ func combine(variables MatchedVariables, predicates []Predicate, expressions []E
 					}
 
 					if valid {
-						//fmt.Printf("sending valid variables %+v\n", complete_vars)
-						c <- struct {
-							MatchedVariables
-							error
-						}{complete_vars, nil}
+						c <- match{origin, complete_vars, nil}
 					}
 				} else {
 					// if all predicates match but variables are not complete, it means
@@ -679,18 +751,18 @@ func combine(variables MatchedVariables, predicates []Predicate, expressions []E
 			}
 
 			// next index
-			if !advanceIndexes(&current, &indexes, facts) {
+			if !advanceIndexes(&current, &indexes, len(facts)) {
 				return
 			}
 		}
 
-	}(c)
+	}()
 	return c
 }
 
-func advanceIndexes(current *int, indexes *[]int, facts *FactSet) bool {
+func advanceIndexes(current *int, indexes *[]int, factCount int) bool {
 	for i := *current; i >= 0; i-- {
-		if (*indexes)[i] < len(*facts)-1 {
+		if (*indexes)[i] < factCount-1 {
 			(*indexes)[i] += 1
 			break
 		} else {
