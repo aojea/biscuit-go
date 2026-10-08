@@ -46,10 +46,10 @@ func BenchmarkWorldRunTransitiveClosure(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				w := benchWorld()
 				for _, f := range facts {
-					w.AddFact(f)
+					w.AddFact(NewOrigin(0), f)
 				}
 				for _, r := range rules {
-					w.AddRule(r)
+					w.AddRule(0, DefaultTrustedOrigins(), r)
 				}
 				if err := w.Run(syms); err != nil {
 					b.Fatal(err)
@@ -91,9 +91,9 @@ func BenchmarkWorldRunJoin(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				w := benchWorld()
 				for _, f := range facts {
-					w.AddFact(f)
+					w.AddFact(NewOrigin(0), f)
 				}
-				w.AddRule(rule)
+				w.AddRule(0, DefaultTrustedOrigins(), rule)
 				if err := w.Run(syms); err != nil {
 					b.Fatal(err)
 				}
@@ -119,7 +119,7 @@ func BenchmarkWorldAddFact(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				w := benchWorld()
 				for _, f := range facts {
-					w.AddFact(f)
+					w.AddFact(NewOrigin(0), f)
 				}
 			}
 		})
@@ -139,10 +139,10 @@ func BenchmarkWorldQueryRule(b *testing.B) {
 
 			w := benchWorld()
 			for i := range n {
-				w.AddFact(Fact{Predicate{right, []Term{syms.Insert(fmt.Sprintf("/file%d", i)), read}}})
+				w.AddFact(NewOrigin(0), Fact{Predicate{right, []Term{syms.Insert(fmt.Sprintf("/file%d", i)), read}}})
 			}
-			w.AddFact(Fact{Predicate{resource, []Term{syms.Insert(fmt.Sprintf("/file%d", n-1))}}})
-			w.AddFact(Fact{Predicate{operation, []Term{read}}})
+			w.AddFact(NewOrigin(0), Fact{Predicate{resource, []Term{syms.Insert(fmt.Sprintf("/file%d", n-1))}}})
+			w.AddFact(NewOrigin(0), Fact{Predicate{operation, []Term{read}}})
 
 			query := Rule{
 				Head: Predicate{check, []Term{Variable(0)}},
@@ -156,7 +156,7 @@ func BenchmarkWorldQueryRule(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				res, err := w.QueryRule(query, syms)
+				res, err := w.QueryRule(query, 0, DefaultTrustedOrigins(), syms)
 				if err != nil || len(*res) != 1 {
 					b.Fatalf("got %d results (%v), want 1", len(*res), err)
 				}
