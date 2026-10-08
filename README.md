@@ -11,8 +11,10 @@ biscuit-go is an implementation of [Biscuit](https://github.com/eclipse-biscuit/
 
 ## Specification compatibility
 
-This library currently accepts datalog `v3.0` blocks (block version `3`, see `MaxSchemaVersion`).
-Support for newer datalog versions is landing incrementally.
+This library currently accepts datalog `v3.0` and `v3.1` blocks (block versions `3` and `4`,
+see `MaxSchemaVersion`). Of the `v3.1` features, `check all` is supported; blocks using scopes
+(`trusting`) or the `v3.1` operators are rejected. Support for newer datalog versions is landing
+incrementally.
 
 The [specification sample suite](./samples) runs in CI: samples using block versions above
 `MaxSchemaVersion` are verified to be rejected and otherwise skipped, so they become active as

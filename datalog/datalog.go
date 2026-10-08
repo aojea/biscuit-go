@@ -261,8 +261,20 @@ func (r Rule) Apply(facts *FactSet, newFacts *FactSet, syms *SymbolTable) error 
 	return nil
 }
 
+// CheckKind selects how the queries of a Check are evaluated.
+type CheckKind byte
+
+const (
+	// CheckKindOne passes when one query has at least one match.
+	CheckKindOne CheckKind = iota
+	// CheckKindAll passes when one query has at least one match and every
+	// match of that query satisfies its expressions.
+	CheckKindAll
+)
+
 type Check struct {
 	Queries []Rule
+	Kind    CheckKind
 }
 
 type FactSet []Fact
@@ -466,6 +478,45 @@ func (w *World) QueryRule(rule Rule, syms *SymbolTable) *FactSet {
 	newFacts := &FactSet{}
 	rule.Apply(w.facts, newFacts, syms)
 	return newFacts
+}
+
+// QueryMatchAll reports whether the body of the rule matches at least once
+// and its expressions hold for every match (the semantics of `check all`).
+func (w *World) QueryMatchAll(rule Rule, syms *SymbolTable) (bool, error) {
+	variables := make(MatchedVariables)
+	for _, predicate := range rule.Body {
+		for _, term := range predicate.Terms {
+			if v, ok := term.(Variable); ok {
+				variables[v] = nil
+			}
+		}
+	}
+
+	// The expressions are evaluated here rather than passed to combine, which
+	// would filter the matches instead of reporting those that fail.
+	found := false
+	passed := true
+	for res := range combine(variables, rule.Body, nil, w.facts, syms) {
+		if res.error != nil {
+			return false, res.error
+		}
+		found = true
+		if !passed {
+			// Keep draining so that combine's goroutine terminates.
+			continue
+		}
+		for _, e := range rule.Expressions {
+			v, err := e.Evaluate(res.MatchedVariables, syms)
+			if err != nil {
+				return false, err
+			}
+			if !v.Equal(Bool(true)) {
+				passed = false
+				break
+			}
+		}
+	}
+	return found && passed, nil
 }
 
 func (w *World) Clone() *World {
