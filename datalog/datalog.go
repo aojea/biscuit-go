@@ -220,6 +220,11 @@ func (e InvalidRuleError) Error() string {
 }
 
 func (r Rule) Apply(facts *FactSet, newFacts *FactSet, syms *SymbolTable) error {
+	return r.apply(facts, newFacts, syms, nil)
+}
+
+// apply returns ErrWorldRunLimitTimeout once deadline passes. A nil deadline disables the limit.
+func (r Rule) apply(facts *FactSet, newFacts *FactSet, syms *SymbolTable, deadline *time.Time) error {
 	// extract all variables from the rule body
 	variables := make(MatchedVariables)
 	for _, predicate := range r.Body {
@@ -232,7 +237,7 @@ func (r Rule) Apply(facts *FactSet, newFacts *FactSet, syms *SymbolTable) error 
 		}
 	}
 
-	combinations, err := combine(variables, r.Body, r.Expressions, facts, syms)
+	combinations, err := combine(variables, r.Body, r.Expressions, facts, syms, deadline)
 	if err != nil {
 		return err
 	}
@@ -309,6 +314,9 @@ var defaultRunLimits = runLimits{
 	maxIterations: 100,
 	maxDuration:   2 * time.Millisecond,
 }
+
+// deadlineCheckInterval is the number of descents between each time check in combine.
+const deadlineCheckInterval = 16
 
 var (
 	ErrWorldRunLimitMaxFacts      = errors.New("datalog: world runtime limit: too many facts")
@@ -388,7 +396,7 @@ func (w *World) Run(syms *SymbolTable) error {
 			if time.Now().After(deadline) {
 				return ErrWorldRunLimitTimeout
 			}
-			if err := r.Apply(w.facts, &newFacts, syms); err != nil {
+			if err := r.apply(w.facts, &newFacts, syms, &deadline); err != nil {
 				return err
 			}
 		}
@@ -489,8 +497,14 @@ func combine(
 	expressions []Expression,
 	facts *FactSet,
 	syms *SymbolTable,
+	deadline *time.Time,
 ) ([]MatchedVariables, error) {
 	var res []MatchedVariables
+
+	// A single rule can walk |facts|^|predicates| tuples, so the deadline is
+	// checked every deadlineCheckInterval descents to a deeper predicate rather
+	// than once per rule. Each descent starts a scan of at most |facts| steps.
+	left := deadlineCheckInterval
 
 	current := 0
 	indexes := make([]int, len(predicates))
@@ -515,6 +529,13 @@ func combine(
 						break
 					} else {
 						current += 1
+						if left--; left == 0 {
+							left = deadlineCheckInterval
+							// A pointer is used to optimise the performances per check
+							if deadline != nil && time.Now().After(*deadline) {
+								return nil, ErrWorldRunLimitTimeout
+							}
+						}
 					}
 				} else {
 					// did not match, we either increase the current index or the previous one
