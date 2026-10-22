@@ -5,10 +5,12 @@ package datalog
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -220,11 +222,11 @@ func (e InvalidRuleError) Error() string {
 }
 
 func (r Rule) Apply(facts *FactSet, newFacts *FactSet, syms *SymbolTable) error {
-	return r.apply(facts, newFacts, syms, nil)
+	return r.apply(facts, indexFacts(newFacts), syms, nil)
 }
 
 // apply returns ErrWorldRunLimitTimeout once the budget's deadline passes. A nil budget disables the limit.
-func (r Rule) apply(facts *FactSet, newFacts *FactSet, syms *SymbolTable, budget *runBudget) error {
+func (r Rule) apply(facts *FactSet, newFacts *indexedFacts, syms *SymbolTable, budget *runBudget) error {
 	// extract all variables from the rule body
 	variables := make(MatchedVariables)
 	for _, predicate := range r.Body {
@@ -256,11 +258,10 @@ func (r Rule) apply(facts *FactSet, newFacts *FactSet, syms *SymbolTable, budget
 
 			predicate.Terms[i] = *v
 		}
-		// Insert scans the whole set for duplicates
-		if err := budget.tick(len(*newFacts) + 1); err != nil {
+		if err := budget.tick(tupleCost); err != nil {
 			return err
 		}
-		newFacts.Insert(Fact{predicate})
+		newFacts.insert(Fact{predicate})
 	}
 
 	return nil
@@ -288,14 +289,101 @@ func (s *FactSet) InsertAll(facts []Fact) {
 	}
 }
 
-func (s *FactSet) insertAll(facts []Fact, budget *runBudget) error {
-	for _, f := range facts {
-		if err := budget.tick(len(*s) + 1); err != nil {
-			return err
-		}
-		s.Insert(f)
+// factKey appends a canonical encoding of a predicate to buf: two predicates
+// have the same key if and only if Predicate.Equal holds, so it can stand in
+// for Equal in a map.
+func factKey(buf []byte, p Predicate) []byte {
+	buf = binary.BigEndian.AppendUint64(buf, uint64(p.Name))
+	buf = binary.BigEndian.AppendUint64(buf, uint64(len(p.Terms)))
+	for _, t := range p.Terms {
+		buf = appendTermKey(buf, t)
 	}
-	return nil
+	return buf
+}
+
+func appendTermKey(buf []byte, t Term) []byte {
+	switch v := t.(type) {
+	case Variable:
+		return binary.BigEndian.AppendUint32(append(buf, 'v'), uint32(v))
+	case Integer:
+		return binary.BigEndian.AppendUint64(append(buf, 'i'), uint64(v))
+	case String:
+		return binary.BigEndian.AppendUint64(append(buf, 's'), uint64(v))
+	case Date:
+		return binary.BigEndian.AppendUint64(append(buf, 'd'), uint64(v))
+	case Bool:
+		if v {
+			return append(buf, 'B', 1)
+		}
+		return append(buf, 'B', 0)
+	case Bytes:
+		buf = binary.BigEndian.AppendUint64(append(buf, 'b'), uint64(len(v)))
+		return append(buf, v...)
+	case Set:
+		// Set.Equal compares lengths, then membership regardless of order or
+		// repetition, so the key is the length plus the sorted distinct elements.
+		elems := make([]string, 0, len(v))
+		for _, e := range v {
+			elems = append(elems, string(appendTermKey(nil, e)))
+		}
+		slices.Sort(elems)
+		elems = slices.Compact(elems)
+		buf = binary.BigEndian.AppendUint64(append(buf, 'S'), uint64(len(v)))
+		buf = binary.BigEndian.AppendUint64(buf, uint64(len(elems)))
+		for _, e := range elems {
+			buf = binary.BigEndian.AppendUint64(buf, uint64(len(e)))
+			buf = append(buf, e...)
+		}
+		return buf
+	default:
+		// unknown Term implementations fall back to their textual form
+		s := t.String()
+		buf = binary.BigEndian.AppendUint64(append(buf, 'X'), uint64(len(s)))
+		return append(buf, s...)
+	}
+}
+
+// indexedFacts is a FactSet that switches from a linear duplicate scan to a
+// key index once it holds indexThreshold facts, where hashing a fact becomes
+// cheaper than comparing it against every fact already in the set.
+type indexedFacts struct {
+	set     *FactSet
+	index   map[string]struct{}
+	scratch []byte
+}
+
+const indexThreshold = 32
+
+func indexFacts(set *FactSet) *indexedFacts {
+	s := &indexedFacts{set: set}
+	if len(*set) >= indexThreshold {
+		s.buildIndex()
+	}
+	return s
+}
+
+func (s *indexedFacts) buildIndex() {
+	s.index = make(map[string]struct{}, 2*len(*s.set))
+	for _, f := range *s.set {
+		s.scratch = factKey(s.scratch[:0], f.Predicate)
+		s.index[string(s.scratch)] = struct{}{}
+	}
+}
+
+func (s *indexedFacts) insert(f Fact) bool {
+	if s.index == nil {
+		if len(*s.set) < indexThreshold {
+			return s.set.Insert(f)
+		}
+		s.buildIndex()
+	}
+	s.scratch = factKey(s.scratch[:0], f.Predicate)
+	if _, dup := s.index[string(s.scratch)]; dup {
+		return false
+	}
+	s.index[string(s.scratch)] = struct{}{}
+	*s.set = append(*s.set, f)
+	return true
 }
 
 func (s *FactSet) Equal(x *FactSet) bool {
@@ -390,6 +478,8 @@ func WithMaxDuration(maxDuration time.Duration) WorldOption {
 
 type World struct {
 	facts *FactSet
+	// idx wraps facts; nil after Clone and rebuilt by indexed()
+	idx   *indexedFacts
 	rules []Rule
 
 	runLimits runLimits
@@ -409,7 +499,16 @@ func NewWorld(opts ...WorldOption) *World {
 }
 
 func (w *World) AddFact(f Fact) {
-	w.facts.Insert(f)
+	w.indexed().insert(f)
+}
+
+// indexed returns w.facts with its duplicate index, rebuilding it when it no
+// longer covers the set (after Clone, or a write through Facts()).
+func (w *World) indexed() *indexedFacts {
+	if w.idx == nil || (w.idx.index != nil && len(w.idx.index) != len(*w.facts)) {
+		w.idx = indexFacts(w.facts)
+	}
+	return w.idx
 }
 
 func (w *World) Facts() *FactSet {
@@ -436,19 +535,23 @@ func (w *World) Run(syms *SymbolTable) error {
 		if time.Now().After(deadline) {
 			return ErrWorldRunLimitTimeout
 		}
-		var newFacts FactSet
+		newFacts := &indexedFacts{set: &FactSet{}}
 		for _, r := range w.rules {
 			if time.Now().After(deadline) {
 				return ErrWorldRunLimitTimeout
 			}
-			if err := r.apply(w.facts, &newFacts, syms, budget); err != nil {
+			if err := r.apply(w.facts, newFacts, syms, budget); err != nil {
 				return err
 			}
 		}
 
 		prevCount := len(*w.facts)
-		if err := w.facts.insertAll(newFacts, budget); err != nil {
-			return err
+		merged := w.indexed()
+		for _, f := range *newFacts.set {
+			if err := budget.tick(tupleCost); err != nil {
+				return err
+			}
+			merged.insert(f)
 		}
 
 		newCount := len(*w.facts)
