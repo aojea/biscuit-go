@@ -382,6 +382,132 @@ func TestResource(t *testing.T) {
 	}
 }
 
+// TestSetConstraint is a port of biscuit-rust's set_constraint.
+func TestSetConstraint(t *testing.T) {
+	w := NewWorld()
+	syms := &SymbolTable{}
+	dbg := SymbolDebugger{syms}
+
+	abc := syms.Insert("abc")
+	def := syms.Insert("def")
+	x := syms.Insert("x")
+	intSet := syms.Insert("int_set")
+	symbolSet := syms.Insert("symbol_set")
+	stringSet := syms.Insert("string_set")
+	test := syms.Insert("test")
+	hello := syms.Insert("hello")
+	zzz := syms.Insert("zzz")
+	ghi := syms.Insert("ghi")
+
+	w.AddFact(Fact{Predicate{x, []Term{abc, Integer(0), test}}})
+	w.AddFact(Fact{Predicate{x, []Term{def, Integer(2), hello}}})
+
+	sym, integer, str := hashVar("sym"), hashVar("int"), hashVar("str")
+	body := []Predicate{{x, []Term{sym, integer, str}}}
+
+	for _, tc := range []struct {
+		rule Rule
+		want *FactSet
+	}{
+		{
+			rule: Rule{
+				Head:        Predicate{intSet, []Term{sym, str}},
+				Body:        body,
+				Expressions: []Expression{{Value{Set{Integer(0), Integer(1)}}, Value{integer}, BinaryOp{Contains{}}}},
+			},
+			want: &FactSet{Fact{Predicate{intSet, []Term{abc, test}}}},
+		},
+		{
+			rule: Rule{
+				Head:        Predicate{symbolSet, []Term{sym, integer, str}},
+				Body:        body,
+				Expressions: []Expression{{Value{Set{abc, ghi}}, Value{sym}, BinaryOp{Contains{}}, UnaryOp{Negate{}}}},
+			},
+			want: &FactSet{Fact{Predicate{symbolSet, []Term{def, Integer(2), hello}}}},
+		},
+		{
+			rule: Rule{
+				Head:        Predicate{stringSet, []Term{sym, integer, str}},
+				Body:        body,
+				Expressions: []Expression{{Value{Set{test, zzz}}, Value{str}, BinaryOp{Contains{}}}},
+			},
+			want: &FactSet{Fact{Predicate{stringSet, []Term{abc, Integer(0), test}}}},
+		},
+	} {
+		res := w.QueryRule(tc.rule, syms)
+		if !res.Equal(tc.want) {
+			t.Errorf("%s:\nhave %s\nwant %s", dbg.Rule(tc.rule), dbg.FactSet(res), dbg.FactSet(tc.want))
+		}
+	}
+}
+
+// TestIntExpr is a port of biscuit-rust's int_expr.
+func TestIntExpr(t *testing.T) {
+	w := NewWorld()
+	syms := &SymbolTable{}
+	dbg := SymbolDebugger{syms}
+
+	abc := syms.Insert("abc")
+	def := syms.Insert("def")
+	x := syms.Insert("x")
+	lessThan := syms.Insert("less_than")
+
+	w.AddFact(Fact{Predicate{x, []Term{Integer(-2), abc}}})
+	w.AddFact(Fact{Predicate{x, []Term{Integer(0), def}}})
+
+	nb, val := hashVar("nb"), hashVar("val")
+	// (5 + -4) * -1 < $nb
+	r1 := Rule{
+		Head: Predicate{lessThan, []Term{nb, val}},
+		Body: []Predicate{{x, []Term{nb, val}}},
+		Expressions: []Expression{{
+			Value{Integer(5)}, Value{Integer(-4)}, BinaryOp{Add{}},
+			Value{Integer(-1)}, BinaryOp{Mul{}},
+			Value{nb}, BinaryOp{LessThan{}},
+		}},
+	}
+
+	res := w.QueryRule(r1, syms)
+	want := &FactSet{Fact{Predicate{lessThan, []Term{Integer(0), def}}}}
+	if !res.Equal(want) {
+		t.Errorf("%s:\nhave %s\nwant %s", dbg.Rule(r1), dbg.FactSet(res), dbg.FactSet(want))
+	}
+}
+
+// TestUnboundVariables is a port of biscuit-rust's unbound_variables.
+func TestUnboundVariables(t *testing.T) {
+	w := NewWorld()
+	syms := &SymbolTable{}
+	dbg := SymbolDebugger{syms}
+
+	operation := syms.Insert("operation")
+	check := syms.Insert("check")
+	read := syms.Insert("read")
+	write := syms.Insert("write")
+	unbound, any1, any2 := hashVar("unbound"), hashVar("any1"), hashVar("any2")
+
+	w.AddFact(Fact{Predicate{operation, []Term{write}}})
+
+	r1 := Rule{
+		Head: Predicate{operation, []Term{unbound, read}},
+		Body: []Predicate{{operation, []Term{any1, any2}}},
+	}
+	if res := w.QueryRule(r1, syms); len(*res) > 0 {
+		t.Errorf("%s generated %s", dbg.Rule(r1), dbg.FactSet(res))
+	}
+
+	// operation($unbound, "read") should not have been generated; in case it
+	// is, verify that rule application does not match it
+	w.AddFact(Fact{Predicate{operation, []Term{unbound, read}}})
+	r2 := Rule{
+		Head: Predicate{check, []Term{read}},
+		Body: []Predicate{{operation, []Term{read}}},
+	}
+	if res := w.QueryRule(r2, syms); len(*res) > 0 {
+		t.Errorf("%s generated %s", dbg.Rule(r2), dbg.FactSet(res))
+	}
+}
+
 func TestSymbolTable(t *testing.T) {
 	s1 := new(SymbolTable)
 	s2 := &SymbolTable{"a", "b", "c"}
