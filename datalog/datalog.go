@@ -223,8 +223,8 @@ func (r Rule) Apply(facts *FactSet, newFacts *FactSet, syms *SymbolTable) error 
 	return r.apply(facts, newFacts, syms, nil)
 }
 
-// apply returns ErrWorldRunLimitTimeout once deadline passes. A nil deadline disables the limit.
-func (r Rule) apply(facts *FactSet, newFacts *FactSet, syms *SymbolTable, deadline *time.Time) error {
+// apply returns ErrWorldRunLimitTimeout once the budget's deadline passes. A nil budget disables the limit.
+func (r Rule) apply(facts *FactSet, newFacts *FactSet, syms *SymbolTable, budget *runBudget) error {
 	// extract all variables from the rule body
 	variables := make(MatchedVariables)
 	for _, predicate := range r.Body {
@@ -237,7 +237,7 @@ func (r Rule) apply(facts *FactSet, newFacts *FactSet, syms *SymbolTable, deadli
 		}
 	}
 
-	combinations, err := combine(variables, r.Body, r.Expressions, facts, syms, deadline)
+	combinations, err := combine(variables, r.Body, r.Expressions, facts, syms, budget)
 	if err != nil {
 		return err
 	}
@@ -255,6 +255,10 @@ func (r Rule) apply(facts *FactSet, newFacts *FactSet, syms *SymbolTable, deadli
 			}
 
 			predicate.Terms[i] = *v
+		}
+		// Insert scans the whole set for duplicates
+		if err := budget.tick(len(*newFacts) + 1); err != nil {
+			return err
 		}
 		newFacts.Insert(Fact{predicate})
 	}
@@ -282,6 +286,16 @@ func (s *FactSet) InsertAll(facts []Fact) {
 	for _, f := range facts {
 		s.Insert(f)
 	}
+}
+
+func (s *FactSet) insertAll(facts []Fact, budget *runBudget) error {
+	for _, f := range facts {
+		if err := budget.tick(len(*s) + 1); err != nil {
+			return err
+		}
+		s.Insert(f)
+	}
+	return nil
 }
 
 func (s *FactSet) Equal(x *FactSet) bool {
@@ -315,8 +329,38 @@ var defaultRunLimits = runLimits{
 	maxDuration:   2 * time.Millisecond,
 }
 
-// deadlineCheckInterval is the number of descents between each time check in combine.
-const deadlineCheckInterval = 16
+// runBudget is the interpreter's cooperative cancellation point: every unbounded
+// loop reports its work through tick, which polls the clock once per
+// budgetCheckEvery units so the per-step cost stays negligible.
+type runBudget struct {
+	deadline time.Time
+	left     int
+}
+
+const (
+	budgetCheckEvery = 1024
+	// a full binding (map clone + expressions) costs about this many Match attempts
+	tupleCost = 32
+)
+
+func newRunBudget(deadline time.Time) *runBudget {
+	return &runBudget{deadline: deadline, left: budgetCheckEvery}
+}
+
+// tick is a no-op on a nil budget so unlimited callers pay only the nil check.
+func (b *runBudget) tick(work int) error {
+	if b == nil {
+		return nil
+	}
+	if b.left -= work; b.left > 0 {
+		return nil
+	}
+	b.left = budgetCheckEvery
+	if time.Now().After(b.deadline) {
+		return ErrWorldRunLimitTimeout
+	}
+	return nil
+}
 
 var (
 	ErrWorldRunLimitMaxFacts      = errors.New("datalog: world runtime limit: too many facts")
@@ -386,6 +430,7 @@ func (w *World) Rules() []Rule {
 
 func (w *World) Run(syms *SymbolTable) error {
 	deadline := time.Now().Add(w.runLimits.maxDuration)
+	budget := newRunBudget(deadline)
 	for i := 0; i < w.runLimits.maxIterations; i++ {
 		// Checked here as well so the limit applies to a world without rules.
 		if time.Now().After(deadline) {
@@ -396,13 +441,15 @@ func (w *World) Run(syms *SymbolTable) error {
 			if time.Now().After(deadline) {
 				return ErrWorldRunLimitTimeout
 			}
-			if err := r.apply(w.facts, &newFacts, syms, &deadline); err != nil {
+			if err := r.apply(w.facts, &newFacts, syms, budget); err != nil {
 				return err
 			}
 		}
 
 		prevCount := len(*w.facts)
-		w.facts.InsertAll([]Fact(newFacts))
+		if err := w.facts.insertAll(newFacts, budget); err != nil {
+			return err
+		}
 
 		newCount := len(*w.facts)
 		if newCount >= w.runLimits.maxFacts {
@@ -491,138 +538,126 @@ func (m MatchedVariables) Clone() MatchedVariables {
 	return res
 }
 
+// combine enumerates every binding of the body predicates that is consistent
+// with the facts and satisfies the expressions, in lexicographic order of fact
+// indexes. Bindings are propagated level by level so a conflicting tuple is
+// pruned at the first predicate that reveals it, like biscuit-rust's CombineIt.
 func combine(
 	variables MatchedVariables,
 	predicates []Predicate,
 	expressions []Expression,
 	facts *FactSet,
 	syms *SymbolTable,
-	deadline *time.Time,
+	budget *runBudget,
 ) ([]MatchedVariables, error) {
-	var res []MatchedVariables
-
-	// A single rule can walk |facts|^|predicates| tuples, so the deadline is
-	// checked every deadlineCheckInterval descents to a deeper predicate rather
-	// than once per rule. Each descent starts a scan of at most |facts| steps.
-	left := deadlineCheckInterval
-
-	current := 0
-	indexes := make([]int, len(predicates))
-
-	// cannot apply a rule on an empty list of facts
-	if len(predicates) > 0 && len(*facts) == 0 {
-		return nil, nil
+	c := &combiner{
+		vars:        variables,
+		cells:       make(map[Variable]*Term, len(variables)),
+		predicates:  predicates,
+		expressions: expressions,
+		facts:       facts,
+		syms:        syms,
+		budget:      budget,
 	}
-
-	// main loop
-	for {
-		if len(predicates) > 0 && len(*facts) > 0 {
-			// look for the next matching set of facts
-			// current indicates which predicate we are looking at, and indexes contains
-			// a list of indexes in the facts list, for each predicate
-			// when we are done looking at a set of facts, the last index is incremented
-			// and if that one reached the max number of facts, the previous one, etc
-			for {
-				if (*facts)[indexes[current]].Match(predicates[current]) {
-					if current == len(predicates)-1 {
-						// extract and check variables, check expressions, send variables
-						break
-					} else {
-						current += 1
-						if left--; left == 0 {
-							left = deadlineCheckInterval
-							// A pointer is used to optimise the performances per check
-							if deadline != nil && time.Now().After(*deadline) {
-								return nil, ErrWorldRunLimitTimeout
-							}
-						}
-					}
-				} else {
-					// did not match, we either increase the current index or the previous one
-					// then we check again for a match
-					if !advanceIndexes(&current, &indexes, facts) {
-						return res, nil
-					}
-				}
-			}
-		}
-
-		// extract and check variables, check expressions, send variables
-		var vars = variables.Clone()
-		var matching = true
-
-	match:
-		for i, pred := range predicates {
-			fact := (*facts)[indexes[i]]
-
-			for j := 0; j < len(pred.Terms); j++ {
-				term := pred.Terms[j]
-				k, ok := term.(Variable)
-				if !ok {
-					continue
-				}
-				v := fact.Terms[j]
-				if !vars.Insert(k, v) {
-					matching = false
-					break match
-				}
-
-			}
-		}
-
-		if matching {
-			if complete_vars := vars.Complete(); complete_vars != nil {
-				valid := true
-				for _, e := range expressions {
-					r, err := e.Evaluate(complete_vars, syms)
-					if err != nil {
-						return nil, err
-					}
-					if !r.Equal(Bool(true)) {
-						valid = false
-						break
-					}
-				}
-
-				if valid {
-					res = append(res, complete_vars)
-				}
-			} else {
-				// if all predicates match but variables are not complete, it means
-				// variables appearing in the head do not appear in the body,
-				// so we should stop here because there's no way to get a correct match
-				return res, nil
-			}
-		}
-
-		// this was a rule or check with expressions but no predicates, no need to
-		// update the indexes, an single execution is enough
-		if len(predicates) == 0 {
-			return res, nil
-		}
-
-		// next index
-		if !advanceIndexes(&current, &indexes, facts) {
-			return res, nil
-		}
+	for v := range variables {
+		c.cells[v] = new(Term)
 	}
+	if err := c.search(0); err != nil {
+		return nil, err
+	}
+	return c.res, nil
 }
 
-func advanceIndexes(current *int, indexes *[]int, facts *FactSet) bool {
-	for i := *current; i >= 0; i-- {
-		if (*indexes)[i] < len(*facts)-1 {
-			(*indexes)[i] += 1
-			break
-		} else {
-			if i > 0 {
-				(*indexes)[i] = 0
-				*current -= 1
-			} else {
-				// we reached the first predicate, we cannot generate more
-				// combinations, so we stop the task
-				return false
+type combiner struct {
+	vars MatchedVariables
+	// cells holds one stable storage slot per variable, so binding does not allocate
+	cells       map[Variable]*Term
+	predicates  []Predicate
+	expressions []Expression
+	facts       *FactSet
+	syms        *SymbolTable
+	budget      *runBudget
+
+	// trail records the variables bound so far, so a level can be undone on backtrack
+	trail []Variable
+	res   []MatchedVariables
+}
+
+func (c *combiner) search(level int) error {
+	if level == len(c.predicates) {
+		return c.emit()
+	}
+	pred := c.predicates[level]
+	// one tick per scan keeps the check out of the inner loop; a scan is at most |facts| steps
+	if err := c.budget.tick(len(*c.facts)); err != nil {
+		return err
+	}
+	for i := range *c.facts {
+		fact := (*c.facts)[i]
+		if !fact.Match(pred) {
+			continue
+		}
+		mark := len(c.trail)
+		if c.bind(pred, fact) {
+			if err := c.search(level + 1); err != nil {
+				return err
 			}
 		}
+		c.unbind(mark)
+	}
+	return nil
+}
+
+func (c *combiner) bind(pred Predicate, fact Fact) bool {
+	for j, term := range pred.Terms {
+		v, ok := term.(Variable)
+		if !ok {
+			continue
+		}
+		if existing := c.vars[v]; existing != nil {
+			if !fact.Terms[j].Equal(*existing) {
+				return false
+			}
+			continue
+		}
+		cell := c.cells[v]
+		*cell = fact.Terms[j]
+		c.vars[v] = cell
+		c.trail = append(c.trail, v)
 	}
 	return true
+}
+
+func (c *combiner) unbind(mark int) {
+	for _, v := range c.trail[mark:] {
+		c.vars[v] = nil
+	}
+	c.trail = c.trail[:mark]
+}
+
+func (c *combiner) emit() error {
+	if err := c.budget.tick(tupleCost); err != nil {
+		return err
+	}
+	complete := c.vars.Complete()
+	if complete == nil {
+		return nil
+	}
+	for _, e := range c.expressions {
+		r, err := e.Evaluate(complete, c.syms)
+		if err != nil {
+			return err
+		}
+		if !r.Equal(Bool(true)) {
+			return nil
+		}
+	}
+	// the cells are reused by later tuples, so the result needs its own copies
+	snapshot := make(MatchedVariables, len(c.vars))
+	for v, t := range c.vars {
+		val := *t
+		snapshot[v] = &val
+	}
+	c.res = append(c.res, snapshot)
+	return nil
 }
