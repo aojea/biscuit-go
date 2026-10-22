@@ -397,7 +397,8 @@ func TestGenerateWorld(t *testing.T) {
 	expectedWorld.AddFact(authorityFact2.convert(StringTable))
 	expectedWorld.AddRule(authorityRule1.convert(StringTable))
 	expectedWorld.AddRule(authorityRule2.convert(StringTable))
-	require.Equal(t, expectedWorld, world)
+	require.Equal(t, expectedWorld.Facts(), world.Facts())
+	require.Equal(t, expectedWorld.Rules(), world.Rules())
 
 	blockBuild := b.CreateBlock()
 	blockRule := Rule{
@@ -428,7 +429,8 @@ func TestGenerateWorld(t *testing.T) {
 	expectedWorld.AddRule(
 		blockRule.convert(&allStrings),
 	)
-	require.Equal(t, expectedWorld, world)
+	require.Equal(t, expectedWorld.Facts(), world.Facts())
+	require.Equal(t, expectedWorld.Rules(), world.Rules())
 }
 
 func TestAppendErrors(t *testing.T) {

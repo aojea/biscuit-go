@@ -222,49 +222,32 @@ func (e InvalidRuleError) Error() string {
 }
 
 func (r Rule) Apply(facts *FactSet, newFacts *FactSet, syms *SymbolTable) error {
-	return r.apply(facts, indexFacts(newFacts), syms, nil)
+	return r.apply(newFactIndex(facts), newFactIndex(newFacts), syms, nil)
 }
 
-// apply returns ErrWorldRunLimitTimeout once the budget's deadline passes. A nil budget disables the limit.
-func (r Rule) apply(facts *FactSet, newFacts *indexedFacts, syms *SymbolTable, budget *runBudget) error {
-	// extract all variables from the rule body
-	variables := make(MatchedVariables)
-	for _, predicate := range r.Body {
-		for _, term := range predicate.Terms {
-			v, ok := term.(Variable)
-			if !ok {
-				continue
-			}
-			variables[v] = nil
-		}
-	}
-
-	combinations, err := combine(variables, r.Body, r.Expressions, facts, syms, budget)
-	if err != nil {
-		return err
-	}
-
-	for _, res := range combinations {
+// apply derives the rule's head for every binding of its body and inserts the
+// results into newFacts. It returns ErrWorldRunLimitTimeout once the budget's
+// deadline passes; a nil budget disables the limit.
+func (r Rule) apply(facts *factIndex, newFacts *factIndex, syms *SymbolTable, budget *runBudget) error {
+	return combine(r.Body, r.Expressions, facts, syms, budget, func(vars MatchedVariables) error {
 		predicate := r.Head.Clone()
 		for i, term := range predicate.Terms {
 			k, ok := term.(Variable)
 			if !ok {
 				continue
 			}
-			v, ok := res[k]
+			v, ok := vars[k]
 			if !ok {
 				return InvalidRuleError{r, k}
 			}
-
 			predicate.Terms[i] = *v
 		}
 		if err := budget.tick(tupleCost); err != nil {
 			return err
 		}
 		newFacts.insert(Fact{predicate})
-	}
-
-	return nil
+		return nil
+	})
 }
 
 type Check struct {
@@ -343,47 +326,121 @@ func appendTermKey(buf []byte, t Term) []byte {
 	}
 }
 
-// indexedFacts is a FactSet that switches from a linear duplicate scan to a
-// key index once it holds indexThreshold facts, where hashing a fact becomes
-// cheaper than comparing it against every fact already in the set.
-type indexedFacts struct {
-	set     *FactSet
-	index   map[string]struct{}
+// lookupKey appends the key under which a fact holding term t at position pos
+// of predicate name is indexed. Term keys are canonical, so a lookup with an
+// Equal term finds the fact.
+func lookupKey(buf []byte, name String, pos int, t Term) []byte {
+	buf = binary.BigEndian.AppendUint64(buf, uint64(name))
+	buf = binary.BigEndian.AppendUint32(buf, uint32(pos))
+	return appendTermKey(buf, t)
+}
+
+// factIndex wraps a FactSet with what the interpreter needs to avoid linear
+// scans. Duplicate detection is a linear scan below indexThreshold facts,
+// where comparing beats hashing, and a key set above. The join lookups,
+// positions of the facts per predicate name and per (name, position, term),
+// are built on first use and extended on demand, since a FactSet only grows.
+type factIndex struct {
+	set  *FactSet
+	keys map[string]struct{}
+
+	// built counts the facts covered by byName and byTerm
+	built  int
+	byName map[String]*[]int
+	byTerm map[string]*[]int
+
 	scratch []byte
 }
 
 const indexThreshold = 32
 
-func indexFacts(set *FactSet) *indexedFacts {
-	s := &indexedFacts{set: set}
+func newFactIndex(set *FactSet) *factIndex {
+	x := &factIndex{set: set}
 	if len(*set) >= indexThreshold {
-		s.buildIndex()
+		x.buildKeys()
 	}
-	return s
+	return x
 }
 
-func (s *indexedFacts) buildIndex() {
-	s.index = make(map[string]struct{}, 2*len(*s.set))
-	for _, f := range *s.set {
-		s.scratch = factKey(s.scratch[:0], f.Predicate)
-		s.index[string(s.scratch)] = struct{}{}
+func (x *factIndex) buildKeys() {
+	x.keys = make(map[string]struct{}, 2*len(*x.set))
+	for _, f := range *x.set {
+		x.scratch = factKey(x.scratch[:0], f.Predicate)
+		x.keys[string(x.scratch)] = struct{}{}
 	}
 }
 
-func (s *indexedFacts) insert(f Fact) bool {
-	if s.index == nil {
-		if len(*s.set) < indexThreshold {
-			return s.set.Insert(f)
+func (x *factIndex) insert(f Fact) bool {
+	if x.keys == nil {
+		if len(*x.set) < indexThreshold {
+			return x.set.Insert(f)
 		}
-		s.buildIndex()
+		x.buildKeys()
 	}
-	s.scratch = factKey(s.scratch[:0], f.Predicate)
-	if _, dup := s.index[string(s.scratch)]; dup {
+	x.scratch = factKey(x.scratch[:0], f.Predicate)
+	if _, dup := x.keys[string(x.scratch)]; dup {
 		return false
 	}
-	s.index[string(s.scratch)] = struct{}{}
-	*s.set = append(*s.set, f)
+	x.keys[string(x.scratch)] = struct{}{}
+	*x.set = append(*x.set, f)
 	return true
+}
+
+// extend brings the join lookups up to date with the set.
+func (x *factIndex) extend() {
+	if x.byName == nil {
+		x.byName = make(map[String]*[]int)
+		x.byTerm = make(map[string]*[]int)
+	}
+	for ; x.built < len(*x.set); x.built++ {
+		f := (*x.set)[x.built]
+		list := x.byName[f.Name]
+		if list == nil {
+			list = new([]int)
+			x.byName[f.Name] = list
+		}
+		*list = append(*list, x.built)
+		for j, t := range f.Terms {
+			x.scratch = lookupKey(x.scratch[:0], f.Name, j, t)
+			list := x.byTerm[string(x.scratch)]
+			if list == nil {
+				list = new([]int)
+				x.byTerm[string(x.scratch)] = list
+			}
+			*list = append(*list, x.built)
+		}
+	}
+}
+
+// candidates returns, in insertion order, the positions of the facts that can
+// match pred under the current bindings: the facts of its name, narrowed to
+// the shortest list indexed on a constant or bound term. The result is a
+// superset of the matches, so callers still unify each candidate.
+func (x *factIndex) candidates(pred Predicate, vars MatchedVariables) []int {
+	x.extend()
+	list := x.byName[pred.Name]
+	if list == nil {
+		return nil
+	}
+	best := *list
+	for j, term := range pred.Terms {
+		if v, ok := term.(Variable); ok {
+			bound := vars[v]
+			if bound == nil {
+				continue
+			}
+			term = *bound
+		}
+		x.scratch = lookupKey(x.scratch[:0], pred.Name, j, term)
+		list, ok := x.byTerm[string(x.scratch)]
+		if !ok {
+			return nil
+		}
+		if len(*list) < len(best) {
+			best = *list
+		}
+	}
+	return best
 }
 
 func (s *FactSet) Equal(x *FactSet) bool {
@@ -479,7 +536,7 @@ func WithMaxDuration(maxDuration time.Duration) WorldOption {
 type World struct {
 	facts *FactSet
 	// idx wraps facts; nil after Clone and rebuilt by indexed()
-	idx   *indexedFacts
+	idx   *factIndex
 	rules []Rule
 
 	runLimits runLimits
@@ -502,11 +559,11 @@ func (w *World) AddFact(f Fact) {
 	w.indexed().insert(f)
 }
 
-// indexed returns w.facts with its duplicate index, rebuilding it when it no
-// longer covers the set (after Clone, or a write through Facts()).
-func (w *World) indexed() *indexedFacts {
-	if w.idx == nil || (w.idx.index != nil && len(w.idx.index) != len(*w.facts)) {
-		w.idx = indexFacts(w.facts)
+// indexed returns w.facts with its index, rebuilding it when the duplicate
+// keys no longer cover the set (after Clone, or a write through Facts()).
+func (w *World) indexed() *factIndex {
+	if w.idx == nil || (w.idx.keys != nil && len(w.idx.keys) != len(*w.facts)) {
+		w.idx = newFactIndex(w.facts)
 	}
 	return w.idx
 }
@@ -535,12 +592,13 @@ func (w *World) Run(syms *SymbolTable) error {
 		if time.Now().After(deadline) {
 			return ErrWorldRunLimitTimeout
 		}
-		newFacts := &indexedFacts{set: &FactSet{}}
+		newFacts := newFactIndex(&FactSet{})
+		facts := w.indexed()
 		for _, r := range w.rules {
 			if time.Now().After(deadline) {
 				return ErrWorldRunLimitTimeout
 			}
-			if err := r.apply(w.facts, newFacts, syms, budget); err != nil {
+			if err := r.apply(facts, newFacts, syms, budget); err != nil {
 				return err
 			}
 		}
@@ -601,16 +659,16 @@ func (w *World) Query(pred Predicate) *FactSet {
 func (w *World) QueryRule(rule Rule, syms *SymbolTable) *FactSet {
 	newFacts := &FactSet{}
 	// swallowing the error explicitly since propagating it would break the current API
-	_ = rule.Apply(w.facts, newFacts, syms)
+	_ = rule.apply(w.indexed(), newFactIndex(newFacts), syms, nil)
 	return newFacts
 }
 
 func (w *World) Clone() *World {
-	newFacts := new(FactSet)
-	*newFacts = *w.facts
+	// a copy, not a shared backing array: both worlds keep appending facts
+	newFacts := slices.Clone(*w.facts)
 	return &World{
-		facts:     newFacts,
-		rules:     append([]Rule{}, w.rules...),
+		facts:     &newFacts,
+		rules:     slices.Clone(w.rules),
 		runLimits: w.runLimits,
 	}
 }
@@ -641,34 +699,42 @@ func (m MatchedVariables) Clone() MatchedVariables {
 	return res
 }
 
-// combine enumerates every binding of the body predicates that is consistent
-// with the facts and satisfies the expressions, in lexicographic order of fact
-// indexes. Bindings are propagated level by level so a conflicting tuple is
-// pruned at the first predicate that reveals it, like biscuit-rust's CombineIt.
+// combine calls emit for every binding of the body predicates that is
+// consistent with the facts and satisfies the expressions, in lexicographic
+// order of fact positions. Bindings are propagated level by level so a
+// conflicting tuple is pruned at the first predicate that reveals it, like
+// biscuit-rust's CombineIt, and each level only visits the facts the index
+// returns for its bound terms. The binding passed to emit is reused by the
+// next tuple, so emit must copy what it keeps.
 func combine(
-	variables MatchedVariables,
 	predicates []Predicate,
 	expressions []Expression,
-	facts *FactSet,
+	facts *factIndex,
 	syms *SymbolTable,
 	budget *runBudget,
-) ([]MatchedVariables, error) {
+	emit func(MatchedVariables) error,
+) error {
 	c := &combiner{
-		vars:        variables,
-		cells:       make(map[Variable]*Term, len(variables)),
+		vars:        make(MatchedVariables),
 		predicates:  predicates,
 		expressions: expressions,
 		facts:       facts,
 		syms:        syms,
 		budget:      budget,
+		emit:        emit,
 	}
-	for v := range variables {
+	for _, predicate := range predicates {
+		for _, term := range predicate.Terms {
+			if v, ok := term.(Variable); ok {
+				c.vars[v] = nil
+			}
+		}
+	}
+	c.cells = make(map[Variable]*Term, len(c.vars))
+	for v := range c.vars {
 		c.cells[v] = new(Term)
 	}
-	if err := c.search(0); err != nil {
-		return nil, err
-	}
-	return c.res, nil
+	return c.search(0)
 }
 
 type combiner struct {
@@ -677,31 +743,28 @@ type combiner struct {
 	cells       map[Variable]*Term
 	predicates  []Predicate
 	expressions []Expression
-	facts       *FactSet
+	facts       *factIndex
 	syms        *SymbolTable
 	budget      *runBudget
+	emit        func(MatchedVariables) error
 
 	// trail records the variables bound so far, so a level can be undone on backtrack
 	trail []Variable
-	res   []MatchedVariables
 }
 
 func (c *combiner) search(level int) error {
 	if level == len(c.predicates) {
-		return c.emit()
+		return c.matched()
 	}
 	pred := c.predicates[level]
-	// one tick per scan keeps the check out of the inner loop; a scan is at most |facts| steps
-	if err := c.budget.tick(len(*c.facts)); err != nil {
+	candidates := c.facts.candidates(pred, c.vars)
+	// one tick per level keeps the check out of the inner loop
+	if err := c.budget.tick(len(candidates) + 1); err != nil {
 		return err
 	}
-	for i := range *c.facts {
-		fact := (*c.facts)[i]
-		if !fact.Match(pred) {
-			continue
-		}
+	for _, i := range candidates {
 		mark := len(c.trail)
-		if c.bind(pred, fact) {
+		if c.unify(pred, (*c.facts.set)[i]) {
 			if err := c.search(level + 1); err != nil {
 				return err
 			}
@@ -711,20 +774,34 @@ func (c *combiner) search(level int) error {
 	return nil
 }
 
-func (c *combiner) bind(pred Predicate, fact Fact) bool {
+// unify binds the variables of pred to the terms of fact, recording them on
+// the trail, and reports whether fact matches pred under the bindings so far.
+// A fact holding a variable matches nothing, as in the reference
+// implementation.
+func (c *combiner) unify(pred Predicate, fact Fact) bool {
+	if fact.Name != pred.Name || len(fact.Terms) != len(pred.Terms) {
+		return false
+	}
 	for j, term := range pred.Terms {
+		ft := fact.Terms[j]
+		if _, ok := ft.(Variable); ok {
+			return false
+		}
 		v, ok := term.(Variable)
 		if !ok {
+			if !term.Equal(ft) {
+				return false
+			}
 			continue
 		}
 		if existing := c.vars[v]; existing != nil {
-			if !fact.Terms[j].Equal(*existing) {
+			if !ft.Equal(*existing) {
 				return false
 			}
 			continue
 		}
 		cell := c.cells[v]
-		*cell = fact.Terms[j]
+		*cell = ft
 		c.vars[v] = cell
 		c.trail = append(c.trail, v)
 	}
@@ -738,7 +815,7 @@ func (c *combiner) unbind(mark int) {
 	c.trail = c.trail[:mark]
 }
 
-func (c *combiner) emit() error {
+func (c *combiner) matched() error {
 	if err := c.budget.tick(tupleCost); err != nil {
 		return err
 	}
@@ -755,12 +832,5 @@ func (c *combiner) emit() error {
 			return nil
 		}
 	}
-	// the cells are reused by later tuples, so the result needs its own copies
-	snapshot := make(MatchedVariables, len(c.vars))
-	for v, t := range c.vars {
-		val := *t
-		snapshot[v] = &val
-	}
-	c.res = append(c.res, snapshot)
-	return nil
+	return c.emit(c.vars)
 }
