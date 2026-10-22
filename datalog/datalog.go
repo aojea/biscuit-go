@@ -474,6 +474,9 @@ var defaultRunLimits = runLimits{
 	maxDuration:   2 * time.Millisecond,
 }
 
+// now is the clock the run limits read; tests replace it.
+var now = time.Now
+
 // runBudget is the interpreter's cooperative cancellation point: every unbounded
 // loop reports its work through tick, which polls the clock once per
 // budgetCheckEvery units so the per-step cost stays negligible.
@@ -501,7 +504,7 @@ func (b *runBudget) tick(work int) error {
 		return nil
 	}
 	b.left = budgetCheckEvery
-	if time.Now().After(b.deadline) {
+	if now().After(b.deadline) {
 		return ErrWorldRunLimitTimeout
 	}
 	return nil
@@ -585,17 +588,17 @@ func (w *World) Rules() []Rule {
 }
 
 func (w *World) Run(syms *SymbolTable) error {
-	deadline := time.Now().Add(w.runLimits.maxDuration)
+	deadline := now().Add(w.runLimits.maxDuration)
 	budget := newRunBudget(deadline)
 	for i := 0; i < w.runLimits.maxIterations; i++ {
 		// Checked here as well so the limit applies to a world without rules.
-		if time.Now().After(deadline) {
+		if now().After(deadline) {
 			return ErrWorldRunLimitTimeout
 		}
 		newFacts := newFactIndex(&FactSet{})
 		facts := w.indexed()
 		for _, r := range w.rules {
-			if time.Now().After(deadline) {
+			if now().After(deadline) {
 				return ErrWorldRunLimitTimeout
 			}
 			if err := r.apply(facts, newFacts, syms, budget); err != nil {
@@ -603,12 +606,15 @@ func (w *World) Run(syms *SymbolTable) error {
 			}
 		}
 
+		// The merge is all or nothing, so a timeout never leaves the world
+		// holding part of an iteration. Its cost is accounted up front; the
+		// facts were already ticked one by one as they were derived.
+		if err := budget.tick(tupleCost * len(*newFacts.set)); err != nil {
+			return err
+		}
 		prevCount := len(*w.facts)
 		merged := w.indexed()
 		for _, f := range *newFacts.set {
-			if err := budget.tick(tupleCost); err != nil {
-				return err
-			}
 			merged.insert(f)
 		}
 

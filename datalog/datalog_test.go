@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -840,7 +841,8 @@ func TestWorldRunTimeoutMidRun(t *testing.T) {
 		WithMaxFacts(1<<20),
 		WithMaxIterations(1<<20),
 	)
-	for i := range 20 {
+	// the closure of a 200-node chain takes well over a millisecond
+	for i := range 200 {
 		w.AddFact(Fact{Predicate{edge, []Term{Integer(i), Integer(i + 1)}}})
 	}
 	w.AddRule(Rule{
@@ -858,6 +860,81 @@ func TestWorldRunTimeoutMidRun(t *testing.T) {
 	require.ErrorIs(t, w.Run(syms), ErrWorldRunLimitTimeout)
 	// Exposes a race condition under -race if Run left a goroutine still writing facts.
 	_ = len(*w.Facts())
+}
+
+// A timeout must leave the world exactly as some completed iteration left it,
+// never with part of the facts the interrupted iteration derived. The clock
+// is faked to expire at every poll in turn, so every point where Run can
+// observe the deadline is exercised.
+func TestWorldRunTimeoutLeavesCompleteIteration(t *testing.T) {
+	syms := &SymbolTable{}
+	edge := syms.Insert("edge")
+	path := syms.Insert("path")
+
+	const nodes = 16
+	var facts FactSet
+	for i := range nodes {
+		facts.Insert(Fact{Predicate{edge, []Term{Integer(i), Integer(i + 1)}}})
+	}
+	rules := []Rule{
+		{
+			Head: Predicate{path, []Term{Variable(0), Variable(1)}},
+			Body: []Predicate{{edge, []Term{Variable(0), Variable(1)}}},
+		},
+		{
+			Head: Predicate{path, []Term{Variable(0), Variable(2)}},
+			Body: []Predicate{
+				{path, []Term{Variable(0), Variable(1)}},
+				{edge, []Term{Variable(1), Variable(2)}},
+			},
+		},
+	}
+	newWorld := func(opts ...WorldOption) *World {
+		w := NewWorld(append([]WorldOption{WithMaxFacts(1 << 20), WithMaxIterations(1 << 20)}, opts...)...)
+		for _, f := range facts {
+			w.AddFact(f)
+		}
+		for _, r := range rules {
+			w.AddRule(r)
+		}
+		return w
+	}
+
+	// the fact set after each completed iteration
+	iterations := []FactSet{slices.Clone(facts)}
+	for k := 1; ; k++ {
+		w := newWorld(WithMaxIterations(k), WithMaxDuration(time.Minute))
+		err := w.Run(syms)
+		iterations = append(iterations, slices.Clone(*w.Facts()))
+		if err == nil {
+			break
+		}
+		require.ErrorIs(t, err, ErrWorldRunLimitMaxIterations)
+	}
+
+	defer func(clock func() time.Time) { now = clock }(now)
+	for polls := 1; ; polls++ {
+		// the first call sets the deadline; the clock jumps past it on call polls+1
+		calls := 0
+		now = func() time.Time {
+			calls++
+			if calls > polls {
+				return time.Time{}.Add(time.Hour)
+			}
+			return time.Time{}
+		}
+		w := newWorld()
+		err := w.Run(syms)
+		if err == nil {
+			require.Greater(t, polls, 1, "the run never polled the clock")
+			return
+		}
+		require.ErrorIs(t, err, ErrWorldRunLimitTimeout)
+
+		got := w.Facts()
+		complete := slices.ContainsFunc(iterations, func(it FactSet) bool { return it.Equal(got) })
+		require.True(t, complete, "expired on poll %d: %d facts match no completed iteration", polls, len(*got))
+	}
 }
 
 func TestWorldRunTimeoutWithinRule(t *testing.T) {
