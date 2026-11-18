@@ -12,7 +12,9 @@ import (
 	"testing"
 
 	"github.com/eclipse-biscuit/biscuit-go/v2/datalog"
+	"github.com/eclipse-biscuit/biscuit-go/v2/pb"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 )
 
 // The flow of the spec: the holder issues a request, the third party signs a
@@ -192,4 +194,55 @@ func TestThirdPartyBlockIsolatedTables(t *testing.T) {
 	ab.AddPolicy(DefaultAllowPolicy)
 	require.NoError(t, ab.Authorize())
 	require.Contains(t, ab.PrintWorld(), "// origin: [1, 2]\nquery(1, 2);")
+}
+
+// Unmarshal refuses the signed blocks the spec rules out. It does not verify
+// signatures, so the tampered tokens are refused for their shape alone.
+func TestUnmarshalRejectsInvalidSignedBlocks(t *testing.T) {
+	_, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
+	thirdPartyPublic, thirdPartyPrivate, _ := ed25519.GenerateKey(rand.Reader)
+
+	token, err := NewBuilder(privateRoot).Build()
+	require.NoError(t, err)
+	request, err := token.ThirdPartyRequest()
+	require.NoError(t, err)
+	contents, err := request.CreateBlock(thirdPartyPrivate, NewThirdPartyBlockBuilder())
+	require.NoError(t, err)
+	token, err = token.AppendThirdPartyBlock(nil, thirdPartyPublic, contents)
+	require.NoError(t, err)
+
+	_, err = Unmarshal(mustSerialize(t, token))
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name   string
+		tamper func(*pb.Biscuit)
+		want   string
+	}{
+		{
+			name:   "external signature on the authority block",
+			tamper: func(c *pb.Biscuit) { c.Authority.ExternalSignature = c.Blocks[0].ExternalSignature },
+			want:   "the authority block cannot carry an external signature",
+		},
+		{
+			name:   "third-party block with a v0 signature",
+			tamper: func(c *pb.Biscuit) { c.Blocks[0].Version = nil },
+			want:   "third-party blocks require block signature version 1, got 0",
+		},
+		{
+			name:   "unknown signature version",
+			tamper: func(c *pb.Biscuit) { c.Authority.Version = proto.Uint32(2) },
+			want:   "unsupported block signature version: 2",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			container := proto.Clone(token.container).(*pb.Biscuit)
+			tc.tamper(container)
+			serialized, err := proto.Marshal(container)
+			require.NoError(t, err)
+
+			_, err = Unmarshal(serialized)
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
 }

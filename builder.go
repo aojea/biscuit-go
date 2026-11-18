@@ -197,7 +197,7 @@ func (u *Unmarshaler) Unmarshal(serialized []byte) (*Biscuit, error) {
 		return nil, err
 	}
 
-	if err := checkSignedBlockFormat(container.Authority); err != nil {
+	if err := checkSignedBlockFormat(container.Authority, true); err != nil {
 		return nil, err
 	}
 
@@ -217,7 +217,7 @@ func (u *Unmarshaler) Unmarshal(serialized []byte) (*Biscuit, error) {
 
 	blocks := make([]*Block, len(container.Blocks))
 	for i, sb := range container.Blocks {
-		if err := checkSignedBlockFormat(sb); err != nil {
+		if err := checkSignedBlockFormat(sb, false); err != nil {
 			return nil, err
 		}
 
@@ -382,15 +382,33 @@ func (b *blockBuilder) Build() *Block {
 	}
 }
 
-// checkSignedBlockFormat rejects a block whose next key or signature cannot be
-// the encoding of its algorithm, before any verification. Ed25519 has fixed
-// sizes; ECDSA signatures are DER and only the key is checked.
-func checkSignedBlockFormat(sb *pb.SignedBlock) error {
+// checkSignedBlockFormat rejects a block that no key can make valid, before
+// any verification: a next key or signature that cannot be the encoding of
+// its algorithm (Ed25519 has fixed sizes; ECDSA signatures are DER and only
+// the key is checked), an unknown signature payload version, or an external
+// signature where the spec does not allow one.
+func checkSignedBlockFormat(sb *pb.SignedBlock, authority bool) error {
 	if _, err := crypto.ParseVerifier(sb.GetNextKey().GetAlgorithm(), sb.GetNextKey().GetKey()); err != nil {
 		return err
 	}
 	if sb.GetNextKey().GetAlgorithm() == pb.PublicKey_Ed25519 && len(sb.GetSignature()) != ed25519.SignatureSize {
 		return ErrInvalidSignatureSize
+	}
+	switch sb.GetVersion() {
+	case signatureVersionV0, signatureVersionV1:
+	default:
+		return fmt.Errorf("biscuit: unsupported block signature version: %d", sb.GetVersion())
+	}
+	if sb.GetExternalSignature() != nil {
+		// The spec binds an external signature to its token through the
+		// signature of the previous block: the authority block has none,
+		// and only version 1 payloads include it.
+		if authority {
+			return errors.New("biscuit: the authority block cannot carry an external signature")
+		}
+		if sb.GetVersion() != signatureVersionV1 {
+			return fmt.Errorf("biscuit: third-party blocks require block signature version %d, got %d", signatureVersionV1, sb.GetVersion())
+		}
 	}
 	return nil
 }
