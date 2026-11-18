@@ -59,9 +59,9 @@ func BenchmarkWorldRunTransitiveClosure(b *testing.B) {
 	}
 }
 
-// Three-way join over 3n facts through Run. c(-1) matches no fact, so combine
-// walks 3n³ steps without a single full match: no allocations, the scan cost
-// (including the deadline budget) dominates.
+// Three-way join over 3n facts through Run. c(-1) matches no fact, so the
+// rule tries n³ candidates without a single match: the cost of trying a
+// candidate (including the run limits) dominates.
 func BenchmarkWorldRunJoin(b *testing.B) {
 	for _, n := range []int{50, 100, 200} {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {

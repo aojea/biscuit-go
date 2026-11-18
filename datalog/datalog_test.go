@@ -775,18 +775,18 @@ func TestApplyInvalidRuleNoGoroutineLeak(t *testing.T) {
 	p := syms.Insert("p")
 	q := syms.Insert("q")
 
-	// $missing is absent from the body; two facts give combine a second match to send.
+	// $missing is absent from the body; with two facts a second match would follow the first.
 	r := Rule{
 		Head: Predicate{p, []Term{hashVar("x"), hashVar("missing")}},
 		Body: []Predicate{{q, []Term{hashVar("x")}}},
 	}
-	facts := []factWithOrigin{
+	candidates := [][]factWithOrigin{{
 		{testOrigin, Fact{Predicate{q, []Term{Integer(1)}}}},
 		{testOrigin, Fact{Predicate{q, []Term{Integer(2)}}}},
-	}
+	}}
 
 	for range 100 {
-		err := r.apply(0, facts, syms, nil, nil, func(Origin, Fact) {})
+		err := r.apply(0, candidates, syms, nil, nil, func(Origin, Fact) {})
 		require.IsType(t, InvalidRuleError{}, err)
 	}
 }
@@ -801,7 +801,7 @@ func TestWorldRunTimeoutMidRun(t *testing.T) {
 		WithMaxFacts(1<<20),
 		WithMaxIterations(1<<20),
 	)
-	for i := range 20 {
+	for i := range 60 {
 		w.AddFact(testOrigin, Fact{Predicate{edge, []Term{Integer(i), Integer(i + 1)}}})
 	}
 	w.AddRule(0, testTrusted, Rule{
@@ -920,7 +920,7 @@ func TestWorldRunTimeoutWithinRule(t *testing.T) {
 	for i := range 200 {
 		w.AddFact(testOrigin, Fact{Predicate{q, []Term{Integer(i)}}})
 	}
-	// The last predicate never matches, so combine walks ~200^4 tuples in one apply.
+	// The last predicate has no candidate, so the rule tries ~200^3 facts in one apply.
 	w.AddRule(0, testTrusted, Rule{
 		Head: Predicate{p, []Term{Variable(0)}},
 		Body: []Predicate{
