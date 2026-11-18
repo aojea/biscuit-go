@@ -98,12 +98,19 @@ func (t *publicKeyTable) insert(key datalog.PublicKey) int64 {
 	return int64(len(*t) - 1)
 }
 
-func (t publicKeyTable) with(keys ...datalog.PublicKey) publicKeyTable {
+// extend returns the table followed by keys, the ones a block introduces. A
+// block only carries keys the table does not have yet: one it already has is
+// refused rather than skipped, which would shift the index of every key
+// after it.
+func (t publicKeyTable) extend(keys ...datalog.PublicKey) (publicKeyTable, error) {
 	res := slices.Clone(t)
 	for _, k := range keys {
-		res.insert(k)
+		if _, known := res.index(k); known {
+			return nil, fmt.Errorf("%w: %s", ErrPublicKeyTableOverlap, k)
+		}
+		res = append(res, k)
 	}
-	return res
+	return res, nil
 }
 
 // scopeKeys lists the public keys of a block's scopes, in order of

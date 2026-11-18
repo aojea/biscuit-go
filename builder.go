@@ -213,7 +213,9 @@ func (u *Unmarshaler) Unmarshal(serialized []byte) (*Biscuit, error) {
 	}
 
 	symbols.Extend(authority.symbols)
-	publicKeys = publicKeys.with(authority.publicKeys...)
+	if publicKeys, err = publicKeys.extend(authority.publicKeys...); err != nil {
+		return nil, err
+	}
 
 	blocks := make([]*Block, len(container.Blocks))
 	for i, sb := range container.Blocks {
@@ -232,7 +234,9 @@ func (u *Unmarshaler) Unmarshal(serialized []byte) (*Biscuit, error) {
 				return nil, err
 			}
 			blocks[i] = block
-			publicKeys = publicKeys.with(block.publicKeys...)
+			if publicKeys, err = publicKeys.extend(block.publicKeys...); err != nil {
+				return nil, err
+			}
 			symbols.Extend(block.symbols)
 			continue
 		}

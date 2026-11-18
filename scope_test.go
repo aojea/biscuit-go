@@ -9,7 +9,9 @@ import (
 	"testing"
 
 	"github.com/eclipse-biscuit/biscuit-go/v2/datalog"
+	"github.com/eclipse-biscuit/biscuit-go/v2/pb"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestPublicKeyParse(t *testing.T) {
@@ -71,6 +73,77 @@ func TestScopesRoundTrip(t *testing.T) {
 
 	_, err = deser.AuthorizerFrom(RootKey(publicRoot))
 	require.NoError(t, err)
+}
+
+// A block declares only the keys the token does not have yet. Skipping a
+// repeated key would number the keys after it differently from the other
+// implementations, so the block is refused instead.
+func TestPublicKeyTableOverlap(t *testing.T) {
+	_, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	trust, err := TrustingPublicKey(pub)
+	require.NoError(t, err)
+	trusting := Check{Queries: []Rule{{
+		Head:   Predicate{Name: "query"},
+		Body:   []Predicate{{Name: "group", IDs: []Term{String("admin")}}},
+		Scopes: []Scope{trust},
+	}}}
+
+	b0, err := NewBuilder(privateRoot).Build()
+	require.NoError(t, err)
+
+	// Both blocks are built from b0, which does not know the key: each declares it.
+	first, stale := b0.CreateBlock(), b0.CreateBlock()
+	require.NoError(t, first.AddCheck(trusting))
+	require.NoError(t, stale.AddCheck(trusting))
+
+	b1, err := b0.Append(rand.Reader, first.Build())
+	require.NoError(t, err)
+	require.Equal(t, publicKeyTable{trust.PublicKey}, b1.publicKeys)
+
+	_, err = b1.Append(rand.Reader, stale.Build())
+	require.ErrorIs(t, err, ErrPublicKeyTableOverlap)
+
+	// The same shapes in a serialized token; Unmarshal does not verify signatures.
+	for _, tc := range []struct {
+		name   string
+		tamper func(*pb.Biscuit)
+	}{
+		{
+			name: "key declared twice by a block",
+			tamper: func(c *pb.Biscuit) {
+				editSignedBlock(t, c.Blocks[0], func(b *pb.Block) { b.PublicKeys = append(b.PublicKeys, b.PublicKeys[0]) })
+			},
+		},
+		{
+			name: "key declared by an earlier block",
+			tamper: func(c *pb.Biscuit) {
+				editSignedBlock(t, c.Authority, func(b *pb.Block) { b.PublicKeys = []*pb.PublicKey{tokenPublicKeyToProtoPublicKey(trust.PublicKey)} })
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			container := proto.Clone(b1.container).(*pb.Biscuit)
+			tc.tamper(container)
+			serialized, err := proto.Marshal(container)
+			require.NoError(t, err)
+
+			_, err = Unmarshal(serialized)
+			require.ErrorIs(t, err, ErrPublicKeyTableOverlap)
+		})
+	}
+}
+
+// editSignedBlock rewrites the serialized content of a signed block, leaving
+// its signature as it was.
+func editSignedBlock(t *testing.T, sb *pb.SignedBlock, edit func(*pb.Block)) {
+	t.Helper()
+	block := new(pb.Block)
+	require.NoError(t, proto.Unmarshal(sb.Block, block))
+	edit(block)
+	edited, err := proto.Marshal(block)
+	require.NoError(t, err)
+	sb.Block = edited
 }
 
 // A block's rules and checks read the authority block, the authorizer and

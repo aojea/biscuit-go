@@ -14,7 +14,10 @@ import (
 // tokenBlockToProtoBlock serializes a block. keys is the key table of the
 // token before this block; the keys the block introduces come after.
 func tokenBlockToProtoBlock(input *Block, keys publicKeyTable) (*pb.Block, error) {
-	keys = keys.with(input.publicKeys...)
+	keys, err := keys.extend(input.publicKeys...)
+	if err != nil {
+		return nil, err
+	}
 	out := &pb.Block{
 		Symbols: *input.symbols,
 		Context: proto.String(input.context),
@@ -23,7 +26,6 @@ func tokenBlockToProtoBlock(input *Block, keys publicKeyTable) (*pb.Block, error
 	for _, k := range input.publicKeys {
 		out.PublicKeys = append(out.PublicKeys, tokenPublicKeyToProtoPublicKey(k))
 	}
-	var err error
 	if out.Scope, err = tokenScopesToProtoScopes(input.scopes, keys); err != nil {
 		return nil, err
 	}
@@ -84,7 +86,10 @@ func protoBlockToTokenBlock(input *pb.Block, keys publicKeyTable) (*Block, error
 		}
 		publicKeys = append(publicKeys, key)
 	}
-	keys = keys.with(publicKeys...)
+	keys, err := keys.extend(publicKeys...)
+	if err != nil {
+		return nil, fmt.Errorf("biscuit: failed to convert proto block to token block: %w", err)
+	}
 
 	scopes, err := protoScopesToTokenScopes(input.Scope, keys)
 	if err != nil {

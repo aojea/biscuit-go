@@ -35,6 +35,8 @@ type Biscuit struct {
 var (
 	// ErrSymbolTableOverlap is returned when multiple blocks declare the same symbols
 	ErrSymbolTableOverlap = errors.New("biscuit: symbol table overlap")
+	// ErrPublicKeyTableOverlap is returned when a block declares a public key twice, or one the token already has
+	ErrPublicKeyTableOverlap = errors.New("biscuit: public key table overlap")
 	// ErrInvalidAuthorityIndex occurs when an authority block index is not 0
 	ErrInvalidAuthorityIndex = errors.New("biscuit: invalid authority index")
 	// ErrInvalidAuthorityFact occurs when an authority fact is an ambient fact
@@ -94,7 +96,10 @@ func newBiscuit(root crypto.Signer, baseSymbols *datalog.SymbolTable, authority 
 	}
 
 	symbols.Extend(authority.symbols)
-	publicKeys := publicKeyTable(nil).with(authority.publicKeys...)
+	publicKeys, err := publicKeyTable(nil).extend(authority.publicKeys...)
+	if err != nil {
+		return nil, err
+	}
 
 	protoAuthority, err := tokenBlockToProtoBlock(authority, nil)
 	if err != nil {
@@ -314,6 +319,10 @@ func (b *Biscuit) Append(rng io.Reader, block *Block) (*Biscuit, error) {
 	if !b.symbols.IsDisjoint(block.symbols) {
 		return nil, ErrSymbolTableOverlap
 	}
+	publicKeys, err := b.publicKeys.extend(block.publicKeys...)
+	if err != nil {
+		return nil, err
+	}
 
 	// clone biscuit fields and append new block
 	authority := new(Block)
@@ -328,7 +337,6 @@ func (b *Biscuit) Append(rng io.Reader, block *Block) (*Biscuit, error) {
 
 	symbols := b.symbols.Clone()
 	symbols.Extend(block.symbols)
-	publicKeys := b.publicKeys.with(block.publicKeys...)
 
 	// serialize and sign the new block
 	protoBlock, err := tokenBlockToProtoBlock(block, b.publicKeys)
