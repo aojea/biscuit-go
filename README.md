@@ -26,6 +26,16 @@ takes a `RootKeyProvider` (`RootKey`, `RootKeysByID`, or your own function) for 
 deprecated. The `datalog.World` methods take the origin of each fact and the origins each rule
 trusts, as in biscuit-rust.
 
+An authorizer evaluates its rules, checks, policies and queries within the step limit of the
+specification: every fact tried for a predicate and every operator or closure applied is a step,
+and an evaluation that takes more than `1000` of them in total fails with
+`datalog.ErrWorldRunLimitMaxSteps`. The limit is a setting of the authorizer:
+
+```go
+authorizer, err := b.AuthorizerFrom(biscuit.RootKey(publicRoot),
+    biscuit.WithWorldOptions(datalog.WithMaxSteps(5000)))
+```
+
 ## Usage
 
 #### Create a biscuit

@@ -786,7 +786,7 @@ func TestApplyInvalidRuleNoGoroutineLeak(t *testing.T) {
 	}}
 
 	for range 100 {
-		err := r.apply(0, candidates, syms, nil, nil, func(Origin, Fact) {})
+		err := r.apply(0, candidates, syms, nil, nil, func(Origin, Fact) (bool, error) { return true, nil })
 		require.IsType(t, InvalidRuleError{}, err)
 	}
 }
@@ -800,6 +800,7 @@ func TestWorldRunTimeoutMidRun(t *testing.T) {
 		WithMaxDuration(time.Millisecond),
 		WithMaxFacts(1<<20),
 		WithMaxIterations(1<<20),
+		WithMaxSteps(1<<30),
 	)
 	for i := range 60 {
 		w.AddFact(testOrigin, Fact{Predicate{edge, []Term{Integer(i), Integer(i + 1)}}})
@@ -858,7 +859,7 @@ func TestWorldRunTimeoutLeavesCompleteIteration(t *testing.T) {
 		},
 	}
 	newWorld := func(opts ...WorldOption) *World {
-		w := NewWorld(append([]WorldOption{WithMaxFacts(1 << 20), WithMaxIterations(1 << 20)}, opts...)...)
+		w := NewWorld(append([]WorldOption{WithMaxFacts(1 << 20), WithMaxIterations(1 << 20), WithMaxSteps(1 << 30)}, opts...)...)
 		for i := range n {
 			w.AddFact(testOrigin, Fact{Predicate{q, []Term{Integer(i)}}})
 		}
@@ -916,7 +917,7 @@ func TestWorldRunTimeoutWithinRule(t *testing.T) {
 	q := syms.Insert("q")
 	none := syms.Insert("none")
 
-	w := NewWorld(WithMaxDuration(10 * time.Millisecond))
+	w := NewWorld(WithMaxDuration(10*time.Millisecond), WithMaxSteps(1<<30))
 	for i := range 200 {
 		w.AddFact(testOrigin, Fact{Predicate{q, []Term{Integer(i)}}})
 	}
@@ -934,4 +935,77 @@ func TestWorldRunTimeoutWithinRule(t *testing.T) {
 	start := time.Now()
 	require.ErrorIs(t, w.Run(syms), ErrWorldRunLimitTimeout)
 	require.Less(t, time.Since(start), time.Second)
+}
+
+// The steps of rule evaluation, with the example of the specification: one
+// step for each candidate tried for a predicate, with the variables the
+// previous predicates bound.
+func TestWorldSteps(t *testing.T) {
+	syms := &SymbolTable{}
+	a, b, c := syms.Insert("a"), syms.Insert("b"), syms.Insert("c")
+	x := Variable(syms.Insert("x"))
+	rule := Rule{
+		Head: Predicate{c, []Term{x}},
+		Body: []Predicate{{a, []Term{x}}, {b, []Term{x}}},
+	}
+	// a(1), a(2), a(3), b(1), b(2), and a fact that is not a candidate.
+	newWorld := func(opts ...WorldOption) *World {
+		w := NewWorld(append([]WorldOption{WithMaxDuration(time.Minute)}, opts...)...)
+		for i := range 3 {
+			w.AddFact(testOrigin, Fact{Predicate{a, []Term{Integer(i + 1)}}})
+		}
+		for i := range 2 {
+			w.AddFact(testOrigin, Fact{Predicate{b, []Term{Integer(i + 1)}}})
+		}
+		w.AddFact(testOrigin, Fact{Predicate{b, []Term{Integer(1), Integer(2)}}})
+		return w
+	}
+
+	// 3 steps for the candidates of a, then 2 for those of b after each.
+	w := newWorld()
+	facts, err := w.QueryRule(rule, 0, testTrusted, syms)
+	require.NoError(t, err)
+	require.Len(t, *facts, 2)
+	require.Equal(t, 9, w.steps)
+
+	// A check stops at the first match: a(1), then b(1).
+	w = newWorld()
+	matched, err := w.QueryMatch(rule, 0, testTrusted, syms)
+	require.NoError(t, err)
+	require.True(t, matched)
+	require.Equal(t, 2, w.steps)
+
+	// `check all` stops at the first match that fails its expressions.
+	w = newWorld()
+	failing := rule
+	failing.Expressions = []Expression{{Value{x}, Value{Integer(1)}, BinaryOp{GreaterThan{}}}}
+	holds, err := w.QueryMatchAll(failing, testTrusted, syms)
+	require.NoError(t, err)
+	require.False(t, holds)
+	require.Equal(t, 3, w.steps)
+
+	// Fact generation evaluates the rule on each iteration, the last one,
+	// which derives nothing new, included.
+	w = newWorld()
+	w.AddRule(0, testTrusted, rule)
+	require.NoError(t, w.Run(syms))
+	require.Equal(t, 18, w.steps)
+
+	// The counter is shared by Run and the queries: the limit applies to
+	// their total, and once reached nothing more is evaluated.
+	w = newWorld(WithMaxSteps(20))
+	w.AddRule(0, testTrusted, rule)
+	require.NoError(t, w.Run(syms))
+	_, err = w.QueryRule(rule, 0, testTrusted, syms)
+	require.ErrorIs(t, err, ErrWorldRunLimitMaxSteps)
+	_, err = w.QueryMatch(rule, 0, testTrusted, syms)
+	require.ErrorIs(t, err, ErrWorldRunLimitMaxSteps)
+	_, err = w.QueryMatchAll(rule, testTrusted, syms)
+	require.ErrorIs(t, err, ErrWorldRunLimitMaxSteps)
+	require.ErrorIs(t, w.Run(syms), ErrWorldRunLimitMaxSteps)
+
+	// A copy of the world counts from zero.
+	clone := w.Clone()
+	require.NoError(t, clone.Run(syms))
+	require.Equal(t, 9, clone.steps)
 }

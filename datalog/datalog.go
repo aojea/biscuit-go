@@ -256,15 +256,15 @@ func (r Rule) variables() MatchedVariables {
 // apply derives the facts of the rule and calls emit for each, with its
 // origin: the origins of the matched facts plus blockID, the block the rule
 // belongs to. candidates holds, for each predicate of the body, the facts it
-// may match. It returns ErrWorldRunLimitTimeout once the budget's deadline
-// passes. A nil budget disables the limit.
-func (r Rule) apply(blockID BlockID, candidates [][]factWithOrigin, syms *SymbolTable, externs ExternFuncs, budget *runBudget, emit func(Origin, Fact)) error {
+// may match. emit returns false to stop at that fact. A nil budget disables
+// the limits.
+func (r Rule) apply(blockID BlockID, candidates [][]factWithOrigin, syms *SymbolTable, externs ExternFuncs, budget *runBudget, emit func(Origin, Fact) (bool, error)) error {
 	return match(r.variables(), r.Body, candidates, budget, func(m *matcher) (bool, error) {
 		if err := budget.tick(tupleCost); err != nil {
 			return false, err
 		}
 		for _, e := range r.Expressions {
-			res, err := e.EvaluateWith(m.vars, syms, externs)
+			res, err := e.evaluate(m.vars, syms, externs, budget)
 			if err != nil {
 				return false, err
 			}
@@ -286,8 +286,7 @@ func (r Rule) apply(blockID BlockID, candidates [][]factWithOrigin, syms *Symbol
 
 			predicate.Terms[i] = *v
 		}
-		emit(m.origin().With(blockID), Fact{predicate})
-		return true, nil
+		return emit(m.origin().With(blockID), Fact{predicate})
 	})
 }
 
@@ -350,17 +349,26 @@ type runLimits struct {
 	maxFacts      int
 	maxIterations int
 	maxDuration   time.Duration
+	maxSteps      int
 }
 
 var defaultRunLimits = runLimits{
 	maxFacts:      1000,
 	maxIterations: 100,
 	maxDuration:   2 * time.Millisecond,
+	maxSteps:      1000,
 }
 
-// runBudget: loops on the Run path report work through tick; the clock is
-// read once per budgetCheckEvery units.
+// runBudget bounds an evaluation of a world. Steps are the deterministic
+// unit of the specification: the world counts them over its whole life,
+// across Run and the queries, against its step limit. Run is bounded in time
+// as well: the loops on its path report work through tick, and the clock is
+// read once per budgetCheckEvery units. A nil budget has no limit.
 type runBudget struct {
+	// steps is the counter of the world.
+	steps    *int
+	maxSteps int
+	// now is nil for an evaluation without a time limit.
 	now      func() time.Time
 	deadline time.Time
 	left     int
@@ -373,9 +381,22 @@ const (
 	tupleCost = 32
 )
 
-// tick is a no-op on a nil budget, so QueryRule and QueryMatchAll pay only the nil check.
-func (b *runBudget) tick(work int) error {
+// step records one step of the specification: a candidate fact tried for a
+// predicate, an operator applied or a closure applied.
+func (b *runBudget) step() error {
 	if b == nil {
+		return nil
+	}
+	*b.steps++
+	if *b.steps > b.maxSteps {
+		return ErrWorldRunLimitMaxSteps
+	}
+	return b.tick(1)
+}
+
+// tick reports work to the time limit.
+func (b *runBudget) tick(work int) error {
+	if b == nil || b.now == nil {
 		return nil
 	}
 	if b.left -= work; b.left > 0 {
@@ -392,6 +413,7 @@ var (
 	ErrWorldRunLimitMaxFacts      = errors.New("datalog: world runtime limit: too many facts")
 	ErrWorldRunLimitMaxIterations = errors.New("datalog: world runtime limit: too many iterations")
 	ErrWorldRunLimitTimeout       = errors.New("datalog: world runtime limit: timeout")
+	ErrWorldRunLimitMaxSteps      = errors.New("datalog: world runtime limit: too many steps")
 )
 
 type WorldOption func(w *World)
@@ -421,6 +443,16 @@ func WithMaxDuration(maxDuration time.Duration) WorldOption {
 	}
 }
 
+// WithMaxSteps sets the step limit of the world: the most steps that Run and
+// the queries may take in total over the life of the world, counted as the
+// specification describes. An evaluation that goes over it stops with
+// ErrWorldRunLimitMaxSteps.
+func WithMaxSteps(maxSteps int) WorldOption {
+	return func(w *World) {
+		w.runLimits.maxSteps = maxSteps
+	}
+}
+
 type factWithOrigin struct {
 	origin Origin
 	fact   Fact
@@ -447,6 +479,9 @@ type World struct {
 
 	runLimits runLimits
 	externs   ExternFuncs
+	// steps counts the steps taken by Run and the queries since the world
+	// was created.
+	steps int
 	// clock is read by the run limits; nil means time.Now and tests inject a fake one
 	clock func() time.Time
 }
@@ -543,6 +578,18 @@ func (w *World) candidates(trusted TrustedOrigins, body []Predicate) [][]factWit
 	return res
 }
 
+// budget returns the limits of an evaluation of the world: the steps the
+// world has left and, for a timed evaluation, a deadline of its own.
+func (w *World) budget(timed bool) *runBudget {
+	b := &runBudget{steps: &w.steps, maxSteps: w.runLimits.maxSteps}
+	if timed {
+		b.now = w.now
+		b.deadline = w.now().Add(w.runLimits.maxDuration)
+		b.left = budgetCheckEvery
+	}
+	return b
+}
+
 // AddRule adds a rule from block blockID, reading the facts of the trusted
 // origins.
 func (w *World) AddRule(blockID BlockID, trusted TrustedOrigins, r Rule) {
@@ -577,8 +624,8 @@ func (w *World) now() time.Time {
 
 // Run applies the rules until no new fact appears or a limit is reached.
 func (w *World) Run(syms *SymbolTable) error {
-	deadline := w.now().Add(w.runLimits.maxDuration)
-	budget := &runBudget{now: w.now, deadline: deadline, left: budgetCheckEvery}
+	budget := w.budget(true)
+	deadline := budget.deadline
 	for i := 0; i < w.runLimits.maxIterations; i++ {
 		// Checked here as well so the limit applies to a world without rules.
 		if w.now().After(deadline) {
@@ -590,8 +637,9 @@ func (w *World) Run(syms *SymbolTable) error {
 				return ErrWorldRunLimitTimeout
 			}
 			candidates := w.candidates(sr.trusted, sr.rule.Body)
-			err := sr.rule.apply(sr.blockID, candidates, syms, w.externs, budget, func(origin Origin, f Fact) {
+			err := sr.rule.apply(sr.blockID, candidates, syms, w.externs, budget, func(origin Origin, f Fact) (bool, error) {
 				newFacts = append(newFacts, factWithOrigin{origin, f})
+				return true, nil
 			})
 			if err != nil {
 				return err
@@ -658,8 +706,9 @@ func (w *World) Query(trusted TrustedOrigins, pred Predicate) *FactSet {
 // non-match.
 func (w *World) QueryRule(rule Rule, blockID BlockID, trusted TrustedOrigins, syms *SymbolTable) (*FactSet, error) {
 	newFacts := &FactSet{}
-	err := rule.apply(blockID, w.candidates(trusted, rule.Body), syms, w.externs, nil, func(_ Origin, f Fact) {
+	err := rule.apply(blockID, w.candidates(trusted, rule.Body), syms, w.externs, w.budget(false), func(_ Origin, f Fact) (bool, error) {
 		newFacts.Insert(f)
+		return true, nil
 	})
 	if err != nil {
 		return nil, err
@@ -667,16 +716,32 @@ func (w *World) QueryRule(rule Rule, blockID BlockID, trusted TrustedOrigins, sy
 	return newFacts, nil
 }
 
+// QueryMatch reports whether the rule, from block blockID, derives a fact
+// from the facts of the trusted origins. Unlike QueryRule it stops at the
+// first one, which is all a check or a policy needs.
+func (w *World) QueryMatch(rule Rule, blockID BlockID, trusted TrustedOrigins, syms *SymbolTable) (bool, error) {
+	found := false
+	err := rule.apply(blockID, w.candidates(trusted, rule.Body), syms, w.externs, w.budget(false), func(Origin, Fact) (bool, error) {
+		found = true
+		return false, nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return found, nil
+}
+
 // QueryMatchAll reports whether the body of the rule matches at least once
 // in the facts of the trusted origins and its expressions hold for every
 // match (the semantics of `check all`). It stops at the first match whose
 // expressions do not hold.
 func (w *World) QueryMatchAll(rule Rule, trusted TrustedOrigins, syms *SymbolTable) (bool, error) {
+	budget := w.budget(false)
 	matched, holds := false, true
-	err := match(rule.variables(), rule.Body, w.candidates(trusted, rule.Body), nil, func(m *matcher) (bool, error) {
+	err := match(rule.variables(), rule.Body, w.candidates(trusted, rule.Body), budget, func(m *matcher) (bool, error) {
 		matched = true
 		for _, e := range rule.Expressions {
-			v, err := e.EvaluateWith(m.vars, syms, w.externs)
+			v, err := e.evaluate(m.vars, syms, w.externs, budget)
 			if err != nil {
 				return false, err
 			}
@@ -693,6 +758,8 @@ func (w *World) QueryMatchAll(rule Rule, trusted TrustedOrigins, syms *SymbolTab
 	return matched && holds, nil
 }
 
+// Clone copies the facts, the rules and the limits of the world. The copy
+// starts with its own step count, at zero.
 func (w *World) Clone() *World {
 	facts := make([]originFacts, len(w.facts))
 	for i, of := range w.facts {
@@ -734,10 +801,10 @@ func (m MatchedVariables) Clone() MatchedVariables {
 }
 
 // matcher enumerates the bindings of the variables of a rule body for which
-// every predicate matches a fact. The predicates are matched in order, each
-// against its candidates and with the variables the previous predicates
-// bound, so a candidate that contradicts them is dropped before the
-// predicates after it are tried.
+// every predicate matches a fact. It follows the evaluation the specification
+// counts steps on: the predicates are matched in order, each against its
+// candidates, with the variables the previous predicates bound, and every
+// candidate tried is one step.
 type matcher struct {
 	body       []Predicate
 	candidates [][]factWithOrigin
@@ -778,7 +845,7 @@ func (m *matcher) from(depth int) (bool, error) {
 	}
 	pred := m.body[depth]
 	for _, c := range m.candidates[depth] {
-		if err := m.budget.tick(1); err != nil {
+		if err := m.budget.step(); err != nil {
 			return false, err
 		}
 		if !c.fact.Match(pred) || !m.bind(depth, pred, c.fact) {

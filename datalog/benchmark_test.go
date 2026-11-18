@@ -11,7 +11,7 @@ import (
 
 // benchWorld lifts the default run limits, which are sized for tokens, not benchmarks.
 func benchWorld() *World {
-	return NewWorld(WithMaxDuration(time.Minute), WithMaxFacts(1<<20), WithMaxIterations(1<<20))
+	return NewWorld(WithMaxDuration(time.Minute), WithMaxFacts(1<<20), WithMaxIterations(1<<20), WithMaxSteps(1<<30))
 }
 
 // A chain of n nodes; path is the transitive closure of edge.
