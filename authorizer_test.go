@@ -188,7 +188,9 @@ func TestVerifierSerializeLoad(t *testing.T) {
 	require.NoError(t, v2.LoadPolicies(s))
 
 	require.Equal(t, v1.(*authorizer).world.Facts(), v2.(*authorizer).world.Facts())
-	require.Equal(t, v1.(*authorizer).world.Rules(), v2.(*authorizer).world.Rules())
+	// Rules stay with the authorizer until the world is run.
+	require.Len(t, v1.(*authorizer).rules, 1)
+	require.Equal(t, v1.(*authorizer).rules, v2.(*authorizer).rules)
 	require.Equal(t, v1.(*authorizer).checks, v2.(*authorizer).checks)
 	require.Equal(t, v1.(*authorizer).policies, v2.(*authorizer).policies)
 }

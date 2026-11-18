@@ -196,6 +196,51 @@ func TestThirdPartyBlockIsolatedTables(t *testing.T) {
 	require.Contains(t, ab.PrintWorld(), "// origin: [1, 2]\nquery(1, 2);")
 }
 
+// The scopes of the authorizer are the default of its rules as well as of its
+// checks and policies, in whatever order they are added: AddAuthorizer adds
+// the rules of the block before its scopes.
+func TestAuthorizerScopesApplyToItsRules(t *testing.T) {
+	publicRoot, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
+	thirdPartyPublic, thirdPartyPrivate, _ := ed25519.GenerateKey(rand.Reader)
+	trust, err := TrustingPublicKey(thirdPartyPublic)
+	require.NoError(t, err)
+
+	token, err := NewBuilder(privateRoot).Build()
+	require.NoError(t, err)
+	request, err := token.ThirdPartyRequest()
+	require.NoError(t, err)
+	block := NewThirdPartyBlockBuilder()
+	require.NoError(t, block.AddFact(Fact{Predicate{Name: "group", IDs: []Term{String("admin")}}}))
+	contents, err := request.CreateBlock(thirdPartyPrivate, block)
+	require.NoError(t, err)
+	token, err = token.AppendThirdPartyBlock(nil, thirdPartyPublic, contents)
+	require.NoError(t, err)
+
+	// The policy matches a fact that a rule of the authorizer derives from
+	// the third-party block.
+	authorize := func(scopes ...Scope) error {
+		authorizer, err := token.AuthorizerFrom(RootKey(publicRoot))
+		require.NoError(t, err)
+		authorizer.AddAuthorizer(ParsedAuthorizer{
+			Block: ParsedBlock{
+				Rules: []Rule{{
+					Head: Predicate{Name: "is_admin", IDs: []Term{Bool(true)}},
+					Body: []Predicate{{Name: "group", IDs: []Term{String("admin")}}},
+				}},
+				Scopes: scopes,
+			},
+			Policies: []Policy{{Kind: PolicyKindAllow, Queries: []Rule{{
+				Head: Predicate{Name: "query"},
+				Body: []Predicate{{Name: "is_admin", IDs: []Term{Bool(true)}}},
+			}}}},
+		})
+		return authorizer.Authorize()
+	}
+
+	require.ErrorIs(t, authorize(), ErrNoMatchingPolicy)
+	require.NoError(t, authorize(trust))
+}
+
 // Unmarshal refuses the signed blocks the spec rules out. It does not verify
 // signatures, so the tampered tokens are refused for their shape alone.
 func TestUnmarshalRejectsInvalidSignedBlocks(t *testing.T) {
