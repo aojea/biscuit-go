@@ -241,6 +241,67 @@ func TestAuthorizerScopesApplyToItsRules(t *testing.T) {
 	require.NoError(t, authorize(trust))
 }
 
+// A block may refer to the default symbols, to the symbols of the blocks
+// before it and to its own. A symbol that only a later block defines is
+// refused: that block would decide what the earlier one means.
+func TestUnmarshalRejectsUnknownSymbols(t *testing.T) {
+	_, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
+	check := Check{Queries: []Rule{{
+		Head: Predicate{Name: "query"},
+		Body: []Predicate{{Name: "resource", IDs: []Term{String("file2")}}},
+	}}}
+
+	builder := NewBuilder(privateRoot)
+	require.NoError(t, builder.AddAuthorityFact(Fact{Predicate{Name: "right", IDs: []Term{String("file1"), String("read")}}}))
+	token, err := builder.Build()
+	require.NoError(t, err)
+	for range 2 {
+		block := token.CreateBlock()
+		require.NoError(t, block.AddCheck(check))
+		token, err = token.Append(rand.Reader, block.Build())
+		require.NoError(t, err)
+	}
+	// Block 1 defines "file2" and block 2 reuses it.
+	require.Equal(t, datalog.SymbolTable{"file2"}, *token.blocks[0].symbols)
+	require.Empty(t, *token.blocks[1].symbols)
+
+	unmarshal := func(container *pb.Biscuit) error {
+		serialized, err := proto.Marshal(container)
+		require.NoError(t, err)
+		_, err = Unmarshal(serialized)
+		return err
+	}
+	require.NoError(t, unmarshal(token.container))
+
+	// With the definition moved to block 2, the check of block 1 refers to
+	// a symbol defined after it, as in the sample test039 of the spec.
+	container := proto.Clone(token.container).(*pb.Biscuit)
+	editSignedBlock(t, container.Blocks[0], func(b *pb.Block) { b.Symbols = nil })
+	editSignedBlock(t, container.Blocks[1], func(b *pb.Block) { b.Symbols = []string{"file2"} })
+	err = unmarshal(container)
+	require.ErrorIs(t, err, ErrMissingSymbols)
+	require.ErrorContains(t, err, "unknown symbol 1025")
+
+	// A third-party block has its own table: it cannot borrow the symbol
+	// the token has at the same index.
+	thirdPartyPublic, thirdPartyPrivate, _ := ed25519.GenerateKey(rand.Reader)
+	request, err := token.ThirdPartyRequest()
+	require.NoError(t, err)
+	block := NewThirdPartyBlockBuilder()
+	require.NoError(t, block.AddFact(Fact{Predicate{Name: "group", IDs: []Term{String("staff")}}}))
+	contents, err := request.CreateBlock(thirdPartyPrivate, block)
+	require.NoError(t, err)
+	token, err = token.AppendThirdPartyBlock(nil, thirdPartyPublic, contents)
+	require.NoError(t, err)
+	require.NoError(t, unmarshal(token.container))
+
+	container = proto.Clone(token.container).(*pb.Biscuit)
+	editSignedBlock(t, container.Blocks[2], func(b *pb.Block) { b.Symbols = nil })
+	err = unmarshal(container)
+	require.ErrorIs(t, err, ErrMissingSymbols)
+	require.ErrorContains(t, err, "unknown symbol 1024")
+}
+
 // Unmarshal refuses the signed blocks the spec rules out. It does not verify
 // signatures, so the tampered tokens are refused for their shape alone.
 func TestUnmarshalRejectsInvalidSignedBlocks(t *testing.T) {

@@ -213,6 +213,9 @@ func (u *Unmarshaler) Unmarshal(serialized []byte) (*Biscuit, error) {
 	}
 
 	symbols.Extend(authority.symbols)
+	if err := authority.checkSymbols(symbols); err != nil {
+		return nil, err
+	}
 	if publicKeys, err = publicKeys.extend(authority.publicKeys...); err != nil {
 		return nil, err
 	}
@@ -238,6 +241,9 @@ func (u *Unmarshaler) Unmarshal(serialized []byte) (*Biscuit, error) {
 				return nil, err
 			}
 			symbols.Extend(block.symbols)
+			if err := block.checkSymbols(symbols); err != nil {
+				return nil, err
+			}
 			continue
 		}
 
@@ -432,5 +438,8 @@ func thirdPartyBlock(pbBlock *pb.Block, ext *pb.ExternalSignature) (*Block, erro
 		return nil, err
 	}
 	block.externalKey = &externalKey
+	if err := block.checkSymbols(block.symbolTable(nil)); err != nil {
+		return nil, err
+	}
 	return block, nil
 }

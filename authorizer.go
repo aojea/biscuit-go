@@ -14,6 +14,9 @@ import (
 )
 
 var (
+	// ErrMissingSymbols is returned for a token with a block that refers to
+	// a symbol that the default symbols, the blocks before it and the block
+	// itself do not define.
 	ErrMissingSymbols   = errors.New("biscuit: missing symbols")
 	ErrPolicyDenied     = errors.New("biscuit: denied by policy")
 	ErrNoMatchingPolicy = errors.New("biscuit: denied by no matching policies")

@@ -192,6 +192,132 @@ func (b *Block) symbolTable(token *datalog.SymbolTable) *datalog.SymbolTable {
 	return symbols
 }
 
+// checkSymbols verifies that the block only refers to symbols of the table
+// given: the default symbols, those of the blocks before it and its own for
+// a first-party block; the default symbols and its own for a third-party
+// block. A symbol that only a later block defines is refused, or that block
+// would decide what this one means.
+func (b *Block) checkSymbols(symbols *datalog.SymbolTable) error {
+	c := symbolChecker{symbols}
+	for _, f := range *b.facts {
+		if err := c.predicate(f.Predicate); err != nil {
+			return err
+		}
+	}
+	for _, r := range b.rules {
+		if err := c.rule(r); err != nil {
+			return err
+		}
+	}
+	for _, check := range b.checks {
+		for _, q := range check.Queries {
+			if err := c.rule(q); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// symbolChecker walks the content of a block looking for a reference to a
+// symbol its table does not have: the name of a predicate, of a variable or
+// of an extern function, or a string.
+type symbolChecker struct {
+	symbols *datalog.SymbolTable
+}
+
+func (c symbolChecker) symbol(index uint64) error {
+	known := index < uint64(len(datalog.DEFAULT_SYMBOLS))
+	if index >= uint64(datalog.OFFSET) {
+		known = index-uint64(datalog.OFFSET) < uint64(c.symbols.Len())
+	}
+	if !known {
+		return fmt.Errorf("%w: unknown symbol %d", ErrMissingSymbols, index)
+	}
+	return nil
+}
+
+func (c symbolChecker) rule(r datalog.Rule) error {
+	if err := c.predicate(r.Head); err != nil {
+		return err
+	}
+	for _, p := range r.Body {
+		if err := c.predicate(p); err != nil {
+			return err
+		}
+	}
+	for _, e := range r.Expressions {
+		if err := c.expression(e); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c symbolChecker) predicate(p datalog.Predicate) error {
+	if err := c.symbol(uint64(p.Name)); err != nil {
+		return err
+	}
+	return c.terms(p.Terms...)
+}
+
+func (c symbolChecker) terms(terms ...datalog.Term) error {
+	for _, t := range terms {
+		var err error
+		switch t := t.(type) {
+		case datalog.String:
+			err = c.symbol(uint64(t))
+		case datalog.Variable:
+			err = c.symbol(uint64(t))
+		case datalog.Set:
+			err = c.terms(t...)
+		case datalog.Array:
+			err = c.terms(t...)
+		case datalog.Map:
+			for _, e := range t {
+				if err = c.terms(e.Key, e.Value); err != nil {
+					break
+				}
+			}
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c symbolChecker) expression(e datalog.Expression) error {
+	for _, op := range e {
+		var err error
+		switch op := op.(type) {
+		case datalog.Value:
+			err = c.terms(op.ID)
+		case datalog.Closure:
+			for _, p := range op.Params {
+				if err = c.symbol(uint64(p)); err != nil {
+					break
+				}
+			}
+			if err == nil {
+				err = c.expression(op.Body)
+			}
+		case datalog.UnaryOp:
+			if ffi, ok := op.UnaryOpFunc.(datalog.Ffi); ok {
+				err = c.symbol(uint64(ffi.Name))
+			}
+		case datalog.BinaryOp:
+			if ffi, ok := op.BinaryOpFunc.(datalog.FfiBinary); ok {
+				err = c.symbol(uint64(ffi.Name))
+			}
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (b *Block) Code(symbols *datalog.SymbolTable) string {
 	debug := &datalog.SymbolDebugger{
 		SymbolTable: symbols,
