@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
+#
+# Regenerates pb/ from the protobuf schema of the biscuit specification.
 
-# Buf tooling expects a fully qualified path to the plugins directory.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${ROOT}"
+
 BUF="go run github.com/bufbuild/buf/cmd/buf@v1.50.0"
 
-# Installs protoc plugins required by our buf config.
-BUF_PLUGINS_DIR="$(pwd)/.buf-plugins"
+# Installs protoc plugins required by our buf config. Buf tooling expects a
+# fully qualified path to the plugins directory.
+BUF_PLUGINS_DIR="${ROOT}/.buf-plugins"
 mkdir -p "$BUF_PLUGINS_DIR"
 GOBIN="$BUF_PLUGINS_DIR" go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.5
 
@@ -13,4 +20,4 @@ GOBIN="$BUF_PLUGINS_DIR" go install google.golang.org/protobuf/cmd/protoc-gen-go
 PATH="${BUF_PLUGINS_DIR}:$PATH" $BUF generate \
     --template buf.gen.yaml \
     --debug \
-    https://github.com/eclipse-biscuit/biscuit.git#ref=b3d3fe2
+    https://github.com/eclipse-biscuit/biscuit.git#ref=b3d3fe2d744ea8ee964ab0eba96dbc8c9bde1639
