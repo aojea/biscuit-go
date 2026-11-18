@@ -1540,3 +1540,94 @@ func TestTryOr(t *testing.T) {
 	_, err = (&Expression{Closure{Params: []Variable{v}, Body: Expression{Value{v}}}, Value{Bool(false)}, BinaryOp{TryOr{}}}).Evaluate(map[Variable]*Term{}, syms)
 	require.ErrorContains(t, err, "takes no parameters")
 }
+
+// The steps of expression evaluation, with the examples of the
+// specification: one for each operator applied and one for each closure
+// applied; pushing a value or a closure takes none.
+func TestExpressionSteps(t *testing.T) {
+	syms := &SymbolTable{}
+	p := Variable(syms.Insert("p"))
+	numbers := []Term{Integer(1), Integer(2), Integer(3)}
+	tryOr := Expression{
+		Closure{Body: Expression{Value{Bool(true)}, Value{Integer(0)}, BinaryOp{GreaterThan{}}}},
+		Value{Bool(false)},
+		BinaryOp{TryOr{}},
+	}
+
+	testCases := []struct {
+		desc  string
+		expr  Expression
+		res   Term
+		steps int
+	}{
+		{
+			desc:  "1 + 2 * 3",
+			expr:  Expression{Value{Integer(1)}, Value{Integer(2)}, Value{Integer(3)}, BinaryOp{Mul{}}, BinaryOp{Add{}}},
+			res:   Integer(7),
+			steps: 2,
+		},
+		{
+			desc: "[1, 2, 3].all($p -> $p > 0)",
+			expr: Expression{
+				Value{Array(numbers)},
+				Closure{Params: []Variable{p}, Body: Expression{Value{p}, Value{Integer(0)}, BinaryOp{GreaterThan{}}}},
+				BinaryOp{All{}},
+			},
+			res:   Bool(true),
+			steps: 7,
+		},
+		{
+			desc: "[1, 2, 3].all($p -> true)",
+			expr: Expression{
+				Value{Array(numbers)},
+				Closure{Params: []Variable{p}, Body: Expression{Value{Bool(true)}}},
+				BinaryOp{All{}},
+			},
+			res:   Bool(true),
+			steps: 4,
+		},
+		{
+			desc: "{1, 2, 3}.any($p -> $p == 1)",
+			expr: Expression{
+				Value{Set(numbers)},
+				Closure{Params: []Variable{p}, Body: Expression{Value{p}, Value{Integer(1)}, BinaryOp{HeterogeneousEqual{}}}},
+				BinaryOp{Any{}},
+			},
+			res:   Bool(true),
+			steps: 3,
+		},
+		{
+			desc:  "true || true",
+			expr:  Expression{Value{Bool(true)}, Closure{Body: Expression{Value{Bool(true)}}}, BinaryOp{LazyOr{}}},
+			res:   Bool(true),
+			steps: 1,
+		},
+		{
+			desc:  "false || true",
+			expr:  Expression{Value{Bool(false)}, Closure{Body: Expression{Value{Bool(true)}}}, BinaryOp{LazyOr{}}},
+			res:   Bool(true),
+			steps: 2,
+		},
+		{
+			desc:  "(true > 0).try_or(false)",
+			expr:  tryOr,
+			res:   Bool(false),
+			steps: 3,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.desc, func(t *testing.T) {
+			steps := 0
+			res, err := tc.expr.evaluate(map[Variable]*Term{}, syms, nil, &runBudget{steps: &steps, maxSteps: 100})
+			require.NoError(t, err)
+			require.Equal(t, tc.res, res)
+			require.Equal(t, tc.steps, steps)
+		})
+	}
+
+	// Going over the limit is not an expression error: .try_or() does not
+	// turn it into its fallback.
+	steps := 0
+	_, err := tryOr.evaluate(map[Variable]*Term{}, syms, nil, &runBudget{steps: &steps, maxSteps: 2})
+	require.ErrorIs(t, err, ErrWorldRunLimitMaxSteps)
+}
