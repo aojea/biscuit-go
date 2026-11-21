@@ -302,6 +302,98 @@ func TestUnmarshalRejectsUnknownSymbols(t *testing.T) {
 	require.ErrorContains(t, err, "unknown symbol 1024")
 }
 
+// A block declares only the symbols it adds to the table. A symbol the table
+// already has would not be added again, and the symbols declared after it
+// would get the index of another one.
+func TestUnmarshalRejectsSymbolTableOverlap(t *testing.T) {
+	_, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
+	builder := NewBuilder(privateRoot)
+	require.NoError(t, builder.AddAuthorityFact(Fact{Predicate{Name: "right", IDs: []Term{String("file1")}}}))
+	token, err := builder.Build()
+	require.NoError(t, err)
+	block := token.CreateBlock()
+	require.NoError(t, block.AddCheck(Check{Queries: []Rule{{
+		Head: Predicate{Name: "query"},
+		Body: []Predicate{{Name: "resource", IDs: []Term{String("file2")}}},
+	}}}))
+	token, err = token.Append(rand.Reader, block.Build())
+	require.NoError(t, err)
+
+	thirdPartyPublic, thirdPartyPrivate, _ := ed25519.GenerateKey(rand.Reader)
+	request, err := token.ThirdPartyRequest()
+	require.NoError(t, err)
+	thirdParty := NewThirdPartyBlockBuilder()
+	require.NoError(t, thirdParty.AddFact(Fact{Predicate{Name: "group", IDs: []Term{String("staff")}}}))
+	contents, err := request.CreateBlock(thirdPartyPrivate, thirdParty)
+	require.NoError(t, err)
+	token, err = token.AppendThirdPartyBlock(nil, thirdPartyPublic, contents)
+	require.NoError(t, err)
+
+	unmarshal := func(edit func(*pb.Biscuit)) error {
+		container := proto.Clone(token.container).(*pb.Biscuit)
+		edit(container)
+		serialized, err := proto.Marshal(container)
+		require.NoError(t, err)
+		_, err = Unmarshal(serialized)
+		return err
+	}
+	require.NoError(t, unmarshal(func(*pb.Biscuit) {}))
+
+	// The check of block 1 refers to symbol 1025, "file2". In each case the
+	// table would still have a symbol at that index, but not that one.
+	testCases := []struct {
+		desc    string
+		block   func(*pb.Biscuit) *pb.SignedBlock
+		symbols []string
+		overlap string
+	}{
+		{
+			desc:    "default symbol in the authority block",
+			block:   func(c *pb.Biscuit) *pb.SignedBlock { return c.Authority },
+			symbols: []string{"right", "file1"},
+			overlap: "right",
+		},
+		{
+			desc:    "symbol of a block before",
+			block:   func(c *pb.Biscuit) *pb.SignedBlock { return c.Blocks[0] },
+			symbols: []string{"file1", "other"},
+			overlap: "file1",
+		},
+		{
+			desc:    "default symbol",
+			block:   func(c *pb.Biscuit) *pb.SignedBlock { return c.Blocks[0] },
+			symbols: []string{"read", "other"},
+			overlap: "read",
+		},
+		{
+			desc:    "symbol declared twice",
+			block:   func(c *pb.Biscuit) *pb.SignedBlock { return c.Blocks[0] },
+			symbols: []string{"other", "other"},
+			overlap: "other",
+		},
+		{
+			desc:    "default symbol in a third-party block",
+			block:   func(c *pb.Biscuit) *pb.SignedBlock { return c.Blocks[1] },
+			symbols: []string{"group", "staff"},
+			overlap: "group",
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.desc, func(t *testing.T) {
+			err := unmarshal(func(c *pb.Biscuit) {
+				editSignedBlock(t, tc.block(c), func(b *pb.Block) { b.Symbols = tc.symbols })
+			})
+			require.ErrorIs(t, err, ErrSymbolTableOverlap)
+			require.ErrorContains(t, err, tc.overlap)
+		})
+	}
+
+	// A third-party block has its own table: it may declare a symbol of the token.
+	require.NoError(t, unmarshal(func(c *pb.Biscuit) {
+		editSignedBlock(t, c.Blocks[1], func(b *pb.Block) { b.Symbols = []string{"file1"} })
+	}))
+}
+
 // Unmarshal refuses the signed blocks the spec rules out. It does not verify
 // signatures, so the tampered tokens are refused for their shape alone.
 func TestUnmarshalRejectsInvalidSignedBlocks(t *testing.T) {

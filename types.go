@@ -192,6 +192,28 @@ func (b *Block) symbolTable(token *datalog.SymbolTable) *datalog.SymbolTable {
 	return symbols
 }
 
+// checkNewSymbols verifies that the block declares only symbols that are
+// new: not a default symbol, not a symbol of table (the symbols of the
+// blocks before it, none for a third-party block), and not one it declares
+// twice. A symbol that is not new is not added again, so the symbols after
+// it would get another index than the one the block refers to.
+func (b *Block) checkNewSymbols(table *datalog.SymbolTable) error {
+	known := make(map[string]struct{}, len(datalog.DEFAULT_SYMBOLS)+table.Len()+b.symbols.Len())
+	for _, s := range datalog.DEFAULT_SYMBOLS {
+		known[s] = struct{}{}
+	}
+	for _, s := range *table {
+		known[s] = struct{}{}
+	}
+	for _, s := range *b.symbols {
+		if _, ok := known[s]; ok {
+			return fmt.Errorf("%w: %q", ErrSymbolTableOverlap, s)
+		}
+		known[s] = struct{}{}
+	}
+	return nil
+}
+
 // checkSymbols verifies that the block only refers to symbols of the table
 // given: the default symbols, those of the blocks before it and its own for
 // a first-party block; the default symbols and its own for a third-party
