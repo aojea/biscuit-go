@@ -253,39 +253,41 @@ func (r Rule) variables() MatchedVariables {
 	return variables
 }
 
-// apply derives the facts of the rule from the visible facts and calls emit
-// for each, with its origin: the origins of the matched facts plus blockID,
-// the block the rule belongs to. It returns ErrWorldRunLimitTimeout once the
-// budget's deadline passes. A nil budget disables the limit.
-func (r Rule) apply(blockID BlockID, facts []factWithOrigin, syms *SymbolTable, externs ExternFuncs, budget *runBudget, emit func(Origin, Fact)) error {
-	matches, err := combine(r.variables(), r.Body, r.Expressions, facts, syms, externs, budget)
-	if err != nil {
-		return err
-	}
+// apply derives the facts of the rule and calls emit for each, with its
+// origin: the origins of the matched facts plus blockID, the block the rule
+// belongs to. candidates holds, for each predicate of the body, the facts it
+// may match. emit returns false to stop at that fact. A nil budget disables
+// the limits.
+func (r Rule) apply(blockID BlockID, candidates [][]factWithOrigin, syms *SymbolTable, externs ExternFuncs, budget *runBudget, emit func(Origin, Fact) (bool, error)) error {
+	return match(r.variables(), r.Body, candidates, budget, func(m *matcher) (bool, error) {
+		if err := budget.tick(tupleCost); err != nil {
+			return false, err
+		}
+		for _, e := range r.Expressions {
+			res, err := e.evaluate(m.vars, syms, externs, budget)
+			if err != nil {
+				return false, err
+			}
+			if !res.Equal(Bool(true)) {
+				return true, nil
+			}
+		}
 
-	for _, res := range matches {
 		predicate := r.Head.Clone()
 		for i, term := range predicate.Terms {
 			k, ok := term.(Variable)
 			if !ok {
 				continue
 			}
-			v, ok := res.vars[k]
+			v, ok := m.vars[k]
 			if !ok {
-				return InvalidRuleError{r, k}
+				return false, InvalidRuleError{r, k}
 			}
 
 			predicate.Terms[i] = *v
 		}
-		// emit does not scan for duplicates, Run pays for that when it merges;
-		// building the fact and its origin is charged like a binding
-		if err := budget.tick(tupleCost); err != nil {
-			return err
-		}
-		emit(res.origin.With(blockID), Fact{predicate})
-	}
-
-	return nil
+		return emit(m.origin().With(blockID), Fact{predicate})
+	})
 }
 
 // CheckKind selects how the queries of a Check are evaluated.
@@ -347,17 +349,26 @@ type runLimits struct {
 	maxFacts      int
 	maxIterations int
 	maxDuration   time.Duration
+	maxSteps      int
 }
 
 var defaultRunLimits = runLimits{
 	maxFacts:      1000,
 	maxIterations: 100,
 	maxDuration:   2 * time.Millisecond,
+	maxSteps:      1000,
 }
 
-// runBudget: loops on the Run path report work through tick; the clock is
-// read once per budgetCheckEvery units.
+// runBudget bounds an evaluation of a world. Steps are the deterministic
+// unit of the specification: the world counts them over its whole life,
+// across Run and the queries, against its step limit. Run is bounded in time
+// as well: the loops on its path report work through tick, and the clock is
+// read once per budgetCheckEvery units. A nil budget has no limit.
 type runBudget struct {
+	// steps is the counter of the world.
+	steps    *int
+	maxSteps int
+	// now is nil for an evaluation without a time limit.
 	now      func() time.Time
 	deadline time.Time
 	left     int
@@ -366,13 +377,26 @@ type runBudget struct {
 const (
 	// in units of one Match or Equal call; a clock read costs about 10 units
 	budgetCheckEvery = 1024
-	// a full binding (map clone + expressions) costs about this many units
+	// a binding of every predicate (expressions, derived fact) costs about this many units
 	tupleCost = 32
 )
 
-// tick is a no-op on a nil budget, so QueryRule and QueryMatchAll pay only the nil check.
-func (b *runBudget) tick(work int) error {
+// step records one step of the specification: a candidate fact tried for a
+// predicate, an operator applied or a closure applied.
+func (b *runBudget) step() error {
 	if b == nil {
+		return nil
+	}
+	*b.steps++
+	if *b.steps > b.maxSteps {
+		return ErrWorldRunLimitMaxSteps
+	}
+	return b.tick(1)
+}
+
+// tick reports work to the time limit.
+func (b *runBudget) tick(work int) error {
+	if b == nil || b.now == nil {
 		return nil
 	}
 	if b.left -= work; b.left > 0 {
@@ -389,6 +413,7 @@ var (
 	ErrWorldRunLimitMaxFacts      = errors.New("datalog: world runtime limit: too many facts")
 	ErrWorldRunLimitMaxIterations = errors.New("datalog: world runtime limit: too many iterations")
 	ErrWorldRunLimitTimeout       = errors.New("datalog: world runtime limit: timeout")
+	ErrWorldRunLimitMaxSteps      = errors.New("datalog: world runtime limit: too many steps")
 )
 
 type WorldOption func(w *World)
@@ -418,6 +443,16 @@ func WithMaxDuration(maxDuration time.Duration) WorldOption {
 	}
 }
 
+// WithMaxSteps sets the step limit of the world: the most steps that Run and
+// the queries may take in total over the life of the world, counted as the
+// specification describes. An evaluation that goes over it stops with
+// ErrWorldRunLimitMaxSteps.
+func WithMaxSteps(maxSteps int) WorldOption {
+	return func(w *World) {
+		w.runLimits.maxSteps = maxSteps
+	}
+}
+
 type factWithOrigin struct {
 	origin Origin
 	fact   Fact
@@ -444,6 +479,9 @@ type World struct {
 
 	runLimits runLimits
 	externs   ExternFuncs
+	// steps counts the steps taken by Run and the queries since the world
+	// was created.
+	steps int
 	// clock is read by the run limits; nil means time.Now and tests inject a fake one
 	clock func() time.Time
 }
@@ -520,6 +558,38 @@ func (w *World) visibleFacts(trusted TrustedOrigins) []factWithOrigin {
 	return res
 }
 
+// candidates lists, for each predicate of a rule body, the facts it may
+// match: those of a trusted origin with the name and the number of terms of
+// the predicate.
+func (w *World) candidates(trusted TrustedOrigins, body []Predicate) [][]factWithOrigin {
+	res := make([][]factWithOrigin, len(body))
+	for _, of := range w.facts {
+		if !trusted.Contains(of.origin) {
+			continue
+		}
+		for _, f := range of.facts {
+			for i, p := range body {
+				if f.Name == p.Name && len(f.Terms) == len(p.Terms) {
+					res[i] = append(res[i], factWithOrigin{origin: of.origin, fact: f})
+				}
+			}
+		}
+	}
+	return res
+}
+
+// budget returns the limits of an evaluation of the world: the steps the
+// world has left and, for a timed evaluation, a deadline of its own.
+func (w *World) budget(timed bool) *runBudget {
+	b := &runBudget{steps: &w.steps, maxSteps: w.runLimits.maxSteps}
+	if timed {
+		b.now = w.now
+		b.deadline = w.now().Add(w.runLimits.maxDuration)
+		b.left = budgetCheckEvery
+	}
+	return b
+}
+
 // AddRule adds a rule from block blockID, reading the facts of the trusted
 // origins.
 func (w *World) AddRule(blockID BlockID, trusted TrustedOrigins, r Rule) {
@@ -554,8 +624,8 @@ func (w *World) now() time.Time {
 
 // Run applies the rules until no new fact appears or a limit is reached.
 func (w *World) Run(syms *SymbolTable) error {
-	deadline := w.now().Add(w.runLimits.maxDuration)
-	budget := &runBudget{now: w.now, deadline: deadline, left: budgetCheckEvery}
+	budget := w.budget(true)
+	deadline := budget.deadline
 	for i := 0; i < w.runLimits.maxIterations; i++ {
 		// Checked here as well so the limit applies to a world without rules.
 		if w.now().After(deadline) {
@@ -566,9 +636,10 @@ func (w *World) Run(syms *SymbolTable) error {
 			if w.now().After(deadline) {
 				return ErrWorldRunLimitTimeout
 			}
-			visible := w.visibleFacts(sr.trusted)
-			err := sr.rule.apply(sr.blockID, visible, syms, w.externs, budget, func(origin Origin, f Fact) {
+			candidates := w.candidates(sr.trusted, sr.rule.Body)
+			err := sr.rule.apply(sr.blockID, candidates, syms, w.externs, budget, func(origin Origin, f Fact) (bool, error) {
 				newFacts = append(newFacts, factWithOrigin{origin, f})
+				return true, nil
 			})
 			if err != nil {
 				return err
@@ -635,8 +706,9 @@ func (w *World) Query(trusted TrustedOrigins, pred Predicate) *FactSet {
 // non-match.
 func (w *World) QueryRule(rule Rule, blockID BlockID, trusted TrustedOrigins, syms *SymbolTable) (*FactSet, error) {
 	newFacts := &FactSet{}
-	err := rule.apply(blockID, w.visibleFacts(trusted), syms, w.externs, nil, func(_ Origin, f Fact) {
+	err := rule.apply(blockID, w.candidates(trusted, rule.Body), syms, w.externs, w.budget(false), func(_ Origin, f Fact) (bool, error) {
 		newFacts.Insert(f)
+		return true, nil
 	})
 	if err != nil {
 		return nil, err
@@ -644,30 +716,50 @@ func (w *World) QueryRule(rule Rule, blockID BlockID, trusted TrustedOrigins, sy
 	return newFacts, nil
 }
 
-// QueryMatchAll reports whether the body of the rule matches at least once
-// in the facts of the trusted origins and its expressions hold for every
-// match (the semantics of `check all`).
-func (w *World) QueryMatchAll(rule Rule, trusted TrustedOrigins, syms *SymbolTable) (bool, error) {
-	// The expressions are evaluated here rather than passed to combine, which
-	// would filter the matches instead of reporting those that fail.
-	matches, err := combine(rule.variables(), rule.Body, nil, w.visibleFacts(trusted), syms, w.externs, nil)
+// QueryMatch reports whether the rule, from block blockID, derives a fact
+// from the facts of the trusted origins. Unlike QueryRule it stops at the
+// first one, which is all a check or a policy needs.
+func (w *World) QueryMatch(rule Rule, blockID BlockID, trusted TrustedOrigins, syms *SymbolTable) (bool, error) {
+	found := false
+	err := rule.apply(blockID, w.candidates(trusted, rule.Body), syms, w.externs, w.budget(false), func(Origin, Fact) (bool, error) {
+		found = true
+		return false, nil
+	})
 	if err != nil {
 		return false, err
 	}
-	for _, res := range matches {
+	return found, nil
+}
+
+// QueryMatchAll reports whether the body of the rule matches at least once
+// in the facts of the trusted origins and its expressions hold for every
+// match (the semantics of `check all`). It stops at the first match whose
+// expressions do not hold.
+func (w *World) QueryMatchAll(rule Rule, trusted TrustedOrigins, syms *SymbolTable) (bool, error) {
+	budget := w.budget(false)
+	matched, holds := false, true
+	err := match(rule.variables(), rule.Body, w.candidates(trusted, rule.Body), budget, func(m *matcher) (bool, error) {
+		matched = true
 		for _, e := range rule.Expressions {
-			v, err := e.EvaluateWith(res.vars, syms, w.externs)
+			v, err := e.evaluate(m.vars, syms, w.externs, budget)
 			if err != nil {
 				return false, err
 			}
 			if !v.Equal(Bool(true)) {
+				holds = false
 				return false, nil
 			}
 		}
+		return true, nil
+	})
+	if err != nil {
+		return false, err
 	}
-	return len(matches) > 0, nil
+	return matched && holds, nil
 }
 
+// Clone copies the facts, the rules and the limits of the world. The copy
+// starts with its own step count, at zero.
 func (w *World) Clone() *World {
 	facts := make([]originFacts, len(w.facts))
 	for i, of := range w.facts {
@@ -708,147 +800,104 @@ func (m MatchedVariables) Clone() MatchedVariables {
 	return res
 }
 
-// match is one binding of the variables of a rule body, with the origin of
-// the facts it was built from.
-type match struct {
-	origin Origin
-	vars   MatchedVariables
+// matcher enumerates the bindings of the variables of a rule body for which
+// every predicate matches a fact. It follows the evaluation the specification
+// counts steps on: the predicates are matched in order, each against its
+// candidates, with the variables the previous predicates bound, and every
+// candidate tried is one step.
+type matcher struct {
+	body       []Predicate
+	candidates [][]factWithOrigin
+	// vars holds the variables of the body, bound up to the predicate
+	// being matched.
+	vars MatchedVariables
+	// bound and origins hold, for each predicate, the variables its
+	// current candidate bound and the origin of that candidate.
+	bound   [][]Variable
+	origins []Origin
+	budget  *runBudget
+	yield   func(*matcher) (bool, error)
 }
 
-// combine enumerates the bindings of variables for which every predicate
-// matches a fact and every expression holds. The first expression error
-// stops the enumeration and is returned.
-func combine(
-	variables MatchedVariables,
-	predicates []Predicate,
-	expressions []Expression,
-	facts []factWithOrigin,
-	syms *SymbolTable,
-	externs ExternFuncs,
-	budget *runBudget,
-) ([]match, error) {
-	var res []match
-
-	current := 0
-	indexes := make([]int, len(predicates))
-
-	// cannot apply a rule on an empty list of facts
-	if len(predicates) > 0 && len(facts) == 0 {
-		return nil, nil
+// match calls yield for each binding of variables, until yield returns false
+// or an error. candidates holds the facts each predicate of body may match.
+// The matcher passed to yield has the binding in vars, valid during the call
+// only, and the origin of the facts it comes from.
+func match(variables MatchedVariables, body []Predicate, candidates [][]factWithOrigin, budget *runBudget, yield func(*matcher) (bool, error)) error {
+	m := &matcher{
+		body:       body,
+		candidates: candidates,
+		vars:       variables,
+		bound:      make([][]Variable, len(body)),
+		origins:    make([]Origin, len(body)),
+		budget:     budget,
+		yield:      yield,
 	}
-
-	// main loop
-	for {
-		if len(predicates) > 0 && len(facts) > 0 {
-			// look for the next matching set of facts
-			// current indicates which predicate we are looking at, and indexes contains
-			// a list of indexes in the facts list, for each predicate
-			// when we are done looking at a set of facts, the last index is incremented
-			// and if that one reached the max number of facts, the previous one, etc
-			for {
-				if facts[indexes[current]].fact.Match(predicates[current]) {
-					if current == len(predicates)-1 {
-						// extract and check variables, check expressions, send variables
-						break
-					} else {
-						current += 1
-						// a descent starts a scan of at most |facts| steps; ticking
-						// them here keeps the check out of the inner loop
-						if err := budget.tick(len(facts)); err != nil {
-							return nil, err
-						}
-					}
-				} else {
-					// did not match, we either increase the current index or the previous one
-					// then we check again for a match
-					if !advanceIndexes(&current, &indexes, len(facts)) {
-						return res, nil
-					}
-				}
-			}
-		}
-
-		// extract and check variables, check expressions, send variables
-		if err := budget.tick(tupleCost); err != nil {
-			return nil, err
-		}
-		var vars = variables.Clone()
-		var origin Origin
-		var matching = true
-
-	match:
-		for i, pred := range predicates {
-			fo := facts[indexes[i]]
-			origin = origin.Union(fo.origin)
-
-			for j := 0; j < len(pred.Terms); j++ {
-				term := pred.Terms[j]
-				k, ok := term.(Variable)
-				if !ok {
-					continue
-				}
-				v := fo.fact.Terms[j]
-				if !vars.Insert(k, v) {
-					matching = false
-					break match
-				}
-
-			}
-		}
-
-		if matching {
-			if complete_vars := vars.Complete(); complete_vars != nil {
-				valid := true
-				for _, e := range expressions {
-					r, err := e.EvaluateWith(complete_vars, syms, externs)
-					if err != nil {
-						return nil, err
-					}
-					if !r.Equal(Bool(true)) {
-						valid = false
-						break
-					}
-				}
-
-				if valid {
-					res = append(res, match{origin, complete_vars})
-				}
-			} else {
-				// if all predicates match but variables are not complete, it means
-				// variables appearing in the head do not appear in the body,
-				// so we should stop here because there's no way to get a correct match
-				return res, nil
-			}
-		}
-
-		// this was a rule or check with expressions but no predicates, no need to
-		// update the indexes, an single execution is enough
-		if len(predicates) == 0 {
-			return res, nil
-		}
-
-		// next index
-		if !advanceIndexes(&current, &indexes, len(facts)) {
-			return res, nil
-		}
-	}
+	_, err := m.from(0)
+	return err
 }
 
-func advanceIndexes(current *int, indexes *[]int, factCount int) bool {
-	for i := *current; i >= 0; i-- {
-		if (*indexes)[i] < factCount-1 {
-			(*indexes)[i] += 1
-			break
-		} else {
-			if i > 0 {
-				(*indexes)[i] = 0
-				*current -= 1
-			} else {
-				// we reached the first predicate, we cannot generate more
-				// combinations, so we stop the task
+// from matches the predicates from depth on. It reports whether the
+// enumeration goes on with the next candidate of the predicates before.
+func (m *matcher) from(depth int) (bool, error) {
+	if depth == len(m.body) {
+		return m.yield(m)
+	}
+	pred := m.body[depth]
+	for _, c := range m.candidates[depth] {
+		if err := m.budget.step(); err != nil {
+			return false, err
+		}
+		if !c.fact.Match(pred) || !m.bind(depth, pred, c.fact) {
+			continue
+		}
+		m.origins[depth] = c.origin
+		more, err := m.from(depth + 1)
+		m.unbind(depth)
+		if err != nil || !more {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// bind binds the variables of the predicate to the terms of the fact. When a
+// variable is already bound to another term it reports false and leaves the
+// variables as they were.
+func (m *matcher) bind(depth int, pred Predicate, fact Fact) bool {
+	for i, term := range pred.Terms {
+		v, ok := term.(Variable)
+		if !ok {
+			continue
+		}
+		if bound := m.vars[v]; bound != nil {
+			if !(*bound).Equal(fact.Terms[i]) {
+				m.unbind(depth)
 				return false
 			}
+			continue
 		}
+		value := fact.Terms[i]
+		m.vars[v] = &value
+		m.bound[depth] = append(m.bound[depth], v)
 	}
 	return true
+}
+
+func (m *matcher) unbind(depth int) {
+	for _, v := range m.bound[depth] {
+		m.vars[v] = nil
+	}
+	m.bound[depth] = m.bound[depth][:0]
+}
+
+// origin is the origin of the current binding: the blocks of every fact it
+// was built from.
+func (m *matcher) origin() Origin {
+	var res Origin
+	for _, o := range m.origins {
+		res = append(res, o...)
+	}
+	slices.Sort(res)
+	return slices.Compact(res)
 }

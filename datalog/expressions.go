@@ -35,6 +35,12 @@ func (e *Expression) Evaluate(values map[Variable]*Term, symbols *SymbolTable) (
 // EvaluateWith evaluates the expression with the variables bound to values;
 // extern::name calls resolve against externs.
 func (e *Expression) EvaluateWith(values map[Variable]*Term, symbols *SymbolTable, externs ExternFuncs) (Term, error) {
+	return e.evaluate(values, symbols, externs, nil)
+}
+
+// evaluate is EvaluateWith within the limits of budget. Each operator applied
+// is a step, as is each closure applied; pushing a value or a closure is not.
+func (e *Expression) evaluate(values map[Variable]*Term, symbols *SymbolTable, externs ExternFuncs, budget *runBudget) (Term, error) {
 	s := &stack{}
 
 	for _, op := range *e {
@@ -60,6 +66,9 @@ func (e *Expression) EvaluateWith(values map[Variable]*Term, symbols *SymbolTabl
 				return nil, fmt.Errorf("datalog: expressions: stack overflow")
 			}
 		case OpTypeUnary:
+			if err := budget.step(); err != nil {
+				return nil, err
+			}
 			v, err := s.PopTerm()
 			if err != nil {
 				return nil, fmt.Errorf("datalog: expressions: failed to pop unary value: %w", err)
@@ -79,6 +88,9 @@ func (e *Expression) EvaluateWith(values map[Variable]*Term, symbols *SymbolTabl
 				return nil, fmt.Errorf("datalog: expressions: stack overflow")
 			}
 		case OpTypeBinary:
+			if err := budget.step(); err != nil {
+				return nil, err
+			}
 			right, err := s.Pop()
 			if err != nil {
 				return nil, fmt.Errorf("datalog: expressions: failed to pop binary right value: %w", err)
@@ -93,9 +105,9 @@ func (e *Expression) EvaluateWith(values map[Variable]*Term, symbols *SymbolTabl
 			case right.closure != nil && left.closure != nil:
 				return nil, errors.New("datalog: expressions: binary operator with two closures")
 			case right.closure != nil:
-				res, err = evalWithClosure(op.(BinaryOp), left.term, *right.closure, values, symbols, externs)
+				res, err = evalWithClosure(op.(BinaryOp), left.term, *right.closure, values, symbols, externs, budget)
 			case left.closure != nil:
-				res, err = evalWithClosure(op.(BinaryOp), right.term, *left.closure, values, symbols, externs)
+				res, err = evalWithClosure(op.(BinaryOp), right.term, *left.closure, values, symbols, externs, budget)
 			default:
 				if ffi, ok := op.(BinaryOp).BinaryOpFunc.(FfiBinary); ok {
 					res, err = externs.call(symbols, ffi.Name, left.term, right.term)
@@ -127,7 +139,7 @@ func (e *Expression) EvaluateWith(values map[Variable]*Term, symbols *SymbolTabl
 // the other the term. The closure runs with its parameters bound on top of
 // the current variables; a parameter may not have the name of a bound
 // variable.
-func evalWithClosure(op BinaryOp, left Term, closure Closure, values map[Variable]*Term, symbols *SymbolTable, externs ExternFuncs) (Term, error) {
+func evalWithClosure(op BinaryOp, left Term, closure Closure, values map[Variable]*Term, symbols *SymbolTable, externs ExternFuncs, budget *runBudget) (Term, error) {
 	f, ok := op.BinaryOpFunc.(ClosureOpFunc)
 	if !ok {
 		return nil, fmt.Errorf("datalog: %s does not take a closure", op.Print("", ""))
@@ -141,7 +153,7 @@ func evalWithClosure(op BinaryOp, left Term, closure Closure, values map[Variabl
 	for k, v := range values {
 		scope[k] = v
 	}
-	return f.EvalClosure(left, closure, scope, symbols, externs)
+	return f.EvalClosure(left, closure, scope, symbols, externs, budget)
 }
 
 func (e *Expression) Print(symbols *SymbolTable) string {
@@ -247,14 +259,24 @@ func (c Closure) Print(symbols *SymbolTable) string {
 	return fmt.Sprintf("%s -> %s", strings.Join(params, ", "), body)
 }
 
+// apply evaluates the body of the closure with the variables given, which
+// include its parameters. Applying a closure is a step, whatever its body.
+func (c Closure) apply(values map[Variable]*Term, symbols *SymbolTable, externs ExternFuncs, budget *runBudget) (Term, error) {
+	if err := budget.step(); err != nil {
+		return nil, err
+	}
+	return c.Body.evaluate(values, symbols, externs, budget)
+}
+
 // ClosureOpFunc is a binary operator with a closure operand: the right one
 // for && || .all() .any(), the receiver for .try_or().
 type ClosureOpFunc interface {
 	BinaryOpFunc
 	// EvalClosure receives the term operand and the closure, and the
 	// variables of the expression, which it may extend with the closure
-	// parameters.
-	EvalClosure(left Term, closure Closure, values map[Variable]*Term, symbols *SymbolTable, externs ExternFuncs) (Term, error)
+	// parameters. budget holds the limits of the evaluation it is part of,
+	// nil when there are none.
+	EvalClosure(left Term, closure Closure, values map[Variable]*Term, symbols *SymbolTable, externs ExternFuncs, budget *runBudget) (Term, error)
 }
 
 type Value struct {
@@ -1036,7 +1058,7 @@ func (LazyAnd) Type() BinaryOpType {
 func (LazyAnd) Eval(left Term, right Term, _ *SymbolTable) (Term, error) {
 	return nil, errors.New("datalog: && requires a closure as right value")
 }
-func (LazyAnd) EvalClosure(left Term, closure Closure, values map[Variable]*Term, symbols *SymbolTable, externs ExternFuncs) (Term, error) {
+func (LazyAnd) EvalClosure(left Term, closure Closure, values map[Variable]*Term, symbols *SymbolTable, externs ExternFuncs, budget *runBudget) (Term, error) {
 	b, ok := left.(Bool)
 	if !ok {
 		return nil, fmt.Errorf("datalog: && requires left value to be a Bool, got %T", left)
@@ -1047,7 +1069,7 @@ func (LazyAnd) EvalClosure(left Term, closure Closure, values map[Variable]*Term
 	if !b {
 		return Bool(false), nil
 	}
-	return closure.Body.EvaluateWith(values, symbols, externs)
+	return closure.apply(values, symbols, externs, budget)
 }
 
 // LazyOr is || since datalog v3.3: the right side is a closure, evaluated
@@ -1060,7 +1082,7 @@ func (LazyOr) Type() BinaryOpType {
 func (LazyOr) Eval(left Term, right Term, _ *SymbolTable) (Term, error) {
 	return nil, errors.New("datalog: || requires a closure as right value")
 }
-func (LazyOr) EvalClosure(left Term, closure Closure, values map[Variable]*Term, symbols *SymbolTable, externs ExternFuncs) (Term, error) {
+func (LazyOr) EvalClosure(left Term, closure Closure, values map[Variable]*Term, symbols *SymbolTable, externs ExternFuncs, budget *runBudget) (Term, error) {
 	b, ok := left.(Bool)
 	if !ok {
 		return nil, fmt.Errorf("datalog: || requires left value to be a Bool, got %T", left)
@@ -1071,12 +1093,13 @@ func (LazyOr) EvalClosure(left Term, closure Closure, values map[Variable]*Term,
 	if b {
 		return Bool(true), nil
 	}
-	return closure.Body.EvaluateWith(values, symbols, externs)
+	return closure.apply(values, symbols, externs, budget)
 }
 
 // TryOr is receiver.try_or(fallback): the receiver is a closure without
 // parameters; its value, or fallback when evaluating it fails. The fallback
-// is an ordinary operand, so an error in it is not caught.
+// is an ordinary operand, so an error in it is not caught. Neither is a run
+// limit reached while evaluating the receiver: it stops the evaluation.
 type TryOr struct{}
 
 func (TryOr) Type() BinaryOpType {
@@ -1085,11 +1108,14 @@ func (TryOr) Type() BinaryOpType {
 func (TryOr) Eval(Term, Term, *SymbolTable) (Term, error) {
 	return nil, errors.New("datalog: .try_or() receiver must be a closure")
 }
-func (TryOr) EvalClosure(fallback Term, closure Closure, values map[Variable]*Term, symbols *SymbolTable, externs ExternFuncs) (Term, error) {
+func (TryOr) EvalClosure(fallback Term, closure Closure, values map[Variable]*Term, symbols *SymbolTable, externs ExternFuncs, budget *runBudget) (Term, error) {
 	if len(closure.Params) != 0 {
 		return nil, errors.New("datalog: .try_or() receiver takes no parameters")
 	}
-	res, err := closure.Body.EvaluateWith(values, symbols, externs)
+	res, err := closure.apply(values, symbols, externs, budget)
+	if errors.Is(err, ErrWorldRunLimitMaxSteps) || errors.Is(err, ErrWorldRunLimitTimeout) {
+		return nil, err
+	}
 	if err != nil {
 		return fallback, nil
 	}
@@ -1106,8 +1132,8 @@ func (All) Type() BinaryOpType {
 func (All) Eval(left Term, right Term, _ *SymbolTable) (Term, error) {
 	return nil, errors.New("datalog: .all() requires a closure")
 }
-func (All) EvalClosure(left Term, closure Closure, values map[Variable]*Term, symbols *SymbolTable, externs ExternFuncs) (Term, error) {
-	return forEachElement("all", left, closure, values, symbols, externs, func(res Bool) (Term, bool) {
+func (All) EvalClosure(left Term, closure Closure, values map[Variable]*Term, symbols *SymbolTable, externs ExternFuncs, budget *runBudget) (Term, error) {
+	return forEachElement("all", left, closure, values, symbols, externs, budget, func(res Bool) (Term, bool) {
 		if !res {
 			return Bool(false), true
 		}
@@ -1125,8 +1151,8 @@ func (Any) Type() BinaryOpType {
 func (Any) Eval(left Term, right Term, _ *SymbolTable) (Term, error) {
 	return nil, errors.New("datalog: .any() requires a closure")
 }
-func (Any) EvalClosure(left Term, closure Closure, values map[Variable]*Term, symbols *SymbolTable, externs ExternFuncs) (Term, error) {
-	return forEachElement("any", left, closure, values, symbols, externs, func(res Bool) (Term, bool) {
+func (Any) EvalClosure(left Term, closure Closure, values map[Variable]*Term, symbols *SymbolTable, externs ExternFuncs, budget *runBudget) (Term, error) {
+	return forEachElement("any", left, closure, values, symbols, externs, budget, func(res Bool) (Term, bool) {
 		if res {
 			return Bool(true), true
 		}
@@ -1136,7 +1162,7 @@ func (Any) EvalClosure(left Term, closure Closure, values map[Variable]*Term, sy
 
 // forEachElement evaluates the closure on each element of the collection,
 // stopping when decide returns a result; otherwise the result is exhausted.
-func forEachElement(name string, collection Term, closure Closure, values map[Variable]*Term, symbols *SymbolTable, externs ExternFuncs, decide func(Bool) (Term, bool), exhausted Term) (Term, error) {
+func forEachElement(name string, collection Term, closure Closure, values map[Variable]*Term, symbols *SymbolTable, externs ExternFuncs, budget *runBudget, decide func(Bool) (Term, bool), exhausted Term) (Term, error) {
 	if len(closure.Params) != 1 {
 		return nil, fmt.Errorf("datalog: .%s() takes a closure with one parameter", name)
 	}
@@ -1148,7 +1174,7 @@ func forEachElement(name string, collection Term, closure Closure, values map[Va
 	for _, element := range elements {
 		element := element
 		values[param] = &element
-		res, err := closure.Body.EvaluateWith(values, symbols, externs)
+		res, err := closure.apply(values, symbols, externs, budget)
 		delete(values, param)
 		if err != nil {
 			return nil, err

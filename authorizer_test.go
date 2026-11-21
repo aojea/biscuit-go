@@ -194,3 +194,37 @@ func TestVerifierSerializeLoad(t *testing.T) {
 	require.Equal(t, v1.(*authorizer).checks, v2.(*authorizer).checks)
 	require.Equal(t, v1.(*authorizer).policies, v2.(*authorizer).policies)
 }
+
+// The step limit of the world covers the checks and the policies, closures
+// included. Going over it is a run limit, like a timeout of the fact
+// generation, not an error of the expression that was being evaluated.
+func TestAuthorizerStepLimit(t *testing.T) {
+	publicRoot, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
+
+	// check if [1, 2, 3].all($p -> $p > 0) takes 7 steps: one for .all(), and
+	// for each element one to apply the closure and one for >.
+	builder := NewBuilder(privateRoot)
+	require.NoError(t, builder.AddAuthorityCheck(Check{Queries: []Rule{{
+		Head: Predicate{Name: "query"},
+		Expressions: []Expression{{
+			Value{Term: Array{Integer(1), Integer(2), Integer(3)}},
+			Closure{Params: []Variable{"p"}, Body: Expression{Value{Term: Variable("p")}, Value{Term: Integer(0)}, BinaryGreaterThan}},
+			BinaryAll,
+		}},
+	}}}))
+	b, err := builder.Build()
+	require.NoError(t, err)
+
+	authorize := func(maxSteps int) error {
+		v, err := b.AuthorizerFrom(RootKey(publicRoot), WithWorldOptions(datalog.WithMaxSteps(maxSteps)))
+		require.NoError(t, err)
+		v.AddPolicy(DefaultAllowPolicy)
+		return v.Authorize()
+	}
+
+	require.NoError(t, authorize(7))
+
+	err = authorize(6)
+	require.ErrorIs(t, err, datalog.ErrWorldRunLimitMaxSteps)
+	require.NotErrorIs(t, err, ErrExecution)
+}

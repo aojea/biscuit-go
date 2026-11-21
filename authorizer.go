@@ -256,7 +256,7 @@ func (v *authorizer) Authorize() error {
 		c := check.convert(v.symbols)
 		successful, err := v.checkPasses(c, datalog.AuthorizerBlockID, authorizerTrusted)
 		if err != nil {
-			return fmt.Errorf("%w: %w", ErrExecution, err)
+			return evaluationError(err)
 		}
 		if !successful {
 			errs = append(errs, fmt.Errorf("failed to verify check #%d: %s", i, debug.Check(c)))
@@ -272,7 +272,7 @@ func (v *authorizer) Authorize() error {
 
 		successful, err := v.checkPasses(c, 0, blockTrusted[0])
 		if err != nil {
-			return fmt.Errorf("%w: %w", ErrExecution, err)
+			return evaluationError(err)
 		}
 		if !successful {
 			errs = append(errs, fmt.Errorf("failed to verify block 0 check #%d: %s", i, debug.Check(c)))
@@ -287,11 +287,11 @@ func (v *authorizer) Authorize() error {
 		}
 		for _, query := range policy.Queries {
 			q := query.convert(v.symbols)
-			res, err := v.world.QueryRule(q, datalog.AuthorizerBlockID, v.trustedOrigins(q.Scopes, authorizerTrusted, datalog.AuthorizerBlockID), v.symbols)
+			matched, err := v.world.QueryMatch(q, datalog.AuthorizerBlockID, v.trustedOrigins(q.Scopes, authorizerTrusted, datalog.AuthorizerBlockID), v.symbols)
 			if err != nil {
-				return fmt.Errorf("%w: %w", ErrExecution, err)
+				return evaluationError(err)
 			}
-			if len(*res) != 0 {
+			if matched {
 				switch policy.Kind {
 				case PolicyKindAllow:
 					policyResult = nil
@@ -316,7 +316,7 @@ func (v *authorizer) Authorize() error {
 
 			successful, err := v.checkPasses(c, blockID, blockTrusted[blockID])
 			if err != nil {
-				return fmt.Errorf("%w: %w", ErrExecution, err)
+				return evaluationError(err)
 			}
 			if !successful {
 				errs = append(errs, fmt.Errorf("failed to verify block #%d check #%d: %s", blockID, j, debug.Check(c)))
@@ -349,34 +349,35 @@ func (v *authorizer) Authorize() error {
 func (v *authorizer) checkPasses(c datalog.Check, blockID datalog.BlockID, defaults datalog.TrustedOrigins) (bool, error) {
 	for _, query := range c.Queries {
 		trusted := v.trustedOrigins(query.Scopes, defaults, blockID)
+		var passes bool
+		var err error
 		switch c.Kind {
 		case datalog.CheckKindAll:
-			ok, err := v.world.QueryMatchAll(query, trusted, v.symbols)
-			if err != nil {
-				return false, err
-			}
-			if ok {
-				return true, nil
-			}
+			passes, err = v.world.QueryMatchAll(query, trusted, v.symbols)
 		case datalog.CheckKindReject:
-			res, err := v.world.QueryRule(query, blockID, trusted, v.symbols)
-			if err != nil {
-				return false, err
-			}
-			if len(*res) == 0 {
-				return true, nil
-			}
+			passes, err = v.world.QueryMatch(query, blockID, trusted, v.symbols)
+			passes = !passes
 		default:
-			res, err := v.world.QueryRule(query, blockID, trusted, v.symbols)
-			if err != nil {
-				return false, err
-			}
-			if len(*res) != 0 {
-				return true, nil
-			}
+			passes, err = v.world.QueryMatch(query, blockID, trusted, v.symbols)
+		}
+		if err != nil {
+			return false, err
+		}
+		if passes {
+			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// evaluationError reports an error from the evaluation of a check, a policy
+// or a query: the step limit of the world as World.Run reports it, anything
+// else as ErrExecution.
+func evaluationError(err error) error {
+	if errors.Is(err, datalog.ErrWorldRunLimitMaxSteps) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrExecution, err)
 }
 
 func (v *authorizer) Query(rule Rule) (FactSet, error) {
@@ -391,7 +392,7 @@ func (v *authorizer) Query(rule Rule) (FactSet, error) {
 	q := rule.convert(v.symbols)
 	facts, err := v.world.QueryRule(q, datalog.AuthorizerBlockID, v.trustedOrigins(q.Scopes, datalog.DefaultTrustedOrigins(), datalog.AuthorizerBlockID), v.symbols)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrExecution, err)
+		return nil, evaluationError(err)
 	}
 
 	result := make([]Fact, 0, len(*facts))
