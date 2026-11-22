@@ -600,6 +600,24 @@ func TestParserCheck(t *testing.T) {
 	}
 }
 
+// A check parsed on its own keeps its kind: `reject if` read as `check if`
+// would pass when it must fail.
+func TestParserCheckKind(t *testing.T) {
+	for input, kind := range map[string]biscuit.CheckKind{
+		`check if resource("file1")`:      biscuit.CheckKindOne,
+		`check all resource($r), $r != 1`: biscuit.CheckKindAll,
+		`reject if resource("file1")`:     biscuit.CheckKindReject,
+	} {
+		check, err := FromStringCheck(input)
+		require.NoError(t, err)
+		require.Equal(t, kind, check.Kind, input)
+
+		block, err := FromStringBlock(input + ";")
+		require.NoError(t, err)
+		require.Equal(t, block.Checks[0], check, input)
+	}
+}
+
 func TestMustParserFact(t *testing.T) {
 	p := New()
 	for _, testCase := range getFactTestCases() {
