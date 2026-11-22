@@ -877,4 +877,13 @@ func TestBiscuitExternFuncs(t *testing.T) {
 	err = ab.Authorize()
 	require.ErrorIs(t, err, ErrExecution)
 	require.ErrorIs(t, err, datalog.ErrUndefinedExtern)
+
+	// The functions of the world options and of the authorizer add up.
+	known := funcs["known"]
+	delete(funcs, "known")
+	ab, err = deser.AuthorizerFrom(RootKey(publicRoot), WithExternFuncs(funcs),
+		WithWorldOptions(datalog.WithExternFuncs(datalog.ExternFuncs{"known": wrapExternFunc(known)})))
+	require.NoError(t, err)
+	ab.AddPolicy(DefaultAllowPolicy)
+	require.NoError(t, ab.Authorize())
 }

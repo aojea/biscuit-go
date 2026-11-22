@@ -393,10 +393,15 @@ var (
 
 type WorldOption func(w *World)
 
-// WithExternFuncs registers the functions that extern::name calls resolve to.
+// WithExternFuncs registers the functions that extern::name calls resolve
+// to, in addition to the ones the world has. A function replaces an earlier
+// one that has its name.
 func WithExternFuncs(externs ExternFuncs) WorldOption {
 	return func(w *World) {
-		w.externs = externs
+		merged := make(ExternFuncs, len(w.externs)+len(externs))
+		maps.Copy(merged, w.externs)
+		maps.Copy(merged, externs)
+		w.externs = merged
 	}
 }
 
