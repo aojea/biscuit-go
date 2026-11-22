@@ -9,7 +9,7 @@ Represents a Datalog type, can be one of: parameter, variable, integer, string, 
 - parameter is delimited by curly brackets: `{param}`. Those are replaced by actual values before evaluation.
 - variable is prefixed with a `$` sign followed by a string or an unsigned 32bit base-10 integer,  e.g. `$0` or `$variable1`
 - integer is any base-10 int64
-- string is any utf8 character sequence, between double quotes, e.g. `"/path/to/file.txt"`
+- string is any utf8 character sequence, between double quotes, e.g. `"/path/to/file.txt"`. In a string, `\"` is a quote, `\\` is a backslash and `\n` is a new line; no other escape is valid, and all other characters stand for themselves
 - date is RFC3339 encoded, e.g. `2006-01-02T15:04:05Z`
 - bytes is an hexadecimal encoded string, prefixed with a `hex:` sequence
 - boolean is either `true` or `false`
@@ -50,7 +50,8 @@ Integer literals are signed 64-bit; an operation that overflows is an execution 
 - Equal: `$s == "abc"`
 - Starts with: `$s.starts_with("abc")`
 - Ends with: `$s.ends_with("abc")`
-- Regular expression: `$s.matches("^abc\s+def$") `
+- Regular expression: `$s.matches("^abc\\s+def$")`. The syntax is that of the Go `regexp` package. A
+  string that is not a valid regular expression matches nothing.
 - Contains: `$s.contains("abc")`
 - Length: `$s.length()`
 
@@ -76,7 +77,10 @@ Integer literals are signed 64-bit; an operation that overflows is an execution 
 - Intersection: `$set.intersection({"a"})`
 - Length: `$set.length()`
 - All / Any (datalog v3.3): `$set.all($p -> $p > 0)`, `$set.any($p -> $p > 2)`. The closure parameter
-  may not have the name of a variable already bound in the rule.
+  may not have the name of a variable already bound in the rule. `.all()` stops at the first element
+  for which the closure is false, and `.any()` at the first for which it is true. The elements of a
+  set are read in the order of their value; strings are read in the order in which the authorizer
+  got them, the token first.
 
 ### Array (datalog v3.3)
 
@@ -112,18 +116,21 @@ The operators have the following precedence (highest to lowest):
 
 | Operators                   | Associativity    |
 |-----------------------------|------------------|
-| `!` (prefix)                | not associative  |
 | `*`, `/`                    | left-associative |
 | `+`, `-`                    | left-associative |
+| `!` (prefix)                | prefix           |
 | `&`                         | left-associative |
 | `|`                         | left-associative |
 | `^`                         | left-associative |
 | `>`, `>=`, `<`, `<=`, `===`, `==`, `!==`, `!=` | not associative |
+| `&&`                        | left-associative |
+| `||`                        | left-associative |
+
+`!` applies to what comes after it up to the level of `+` and `-`: `!$a + $b` is `!($a + $b)`, and
+`!$a == $b` is `(!$a) == $b`.
 
 `===` and `!==` are the strict comparisons: comparing values of different types is an error.
 `==` and `!=` compare across types (datalog v3.3): values of different types are not equal.
-| `&&`                        | left-associative |
-| `||`                        | left-associative |
 
 Parentheses can be used to force precedence (or to make it explicit).
 
@@ -135,7 +142,7 @@ A fact is a single predicate that does not contain any variables, e.g. `right("f
 # Rule
 
 A rule is formed from a head, a body, and a list of constraints.
-The head is a single predicate, the body is a list of predicates or constraints. Variables present in the head and in constraints must be introduced by predicates in the body.
+The head is a single predicate, the body is a list of predicates or constraints. Variables present in the head and in constraints must be introduced by predicates in the body: the parser refuses a rule that has another variable. The variables in the body of a closure are not examined.
 
 It has the format: `Head <- (predicate, constraint)+`.
 
@@ -150,6 +157,11 @@ separated with ` or `.
 bodies has at least one match and every match of that body satisfies its expressions, e.g.
 `check all operation($op), allowed_operations($allowed), $allowed.contains($op)`. `reject if`
 passes when none of the bodies has a match.
+
+A check and a policy stop at their first match (`check all` at the first match that does not satisfy
+the expressions): the facts after it are not read. The facts are read as biscuit-rust reads them,
+by origin (the blocks in their order, then the authorizer) and then by their terms. An expression
+that does not give a boolean is an execution error, and not a match that fails.
 
 # Policy
 

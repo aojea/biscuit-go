@@ -26,6 +26,35 @@ takes a `RootKeyProvider` (`RootKey`, `RootKeysByID`, or your own function) for 
 deprecated. The `datalog.World` methods take the origin of each fact and the origins each rule
 trusts, as in biscuit-rust.
 
+### Differences from biscuit-rust
+
+biscuit-rust is the reference implementation. The two implementations were compared with the same
+tokens and the same authorizers. The known differences are:
+
+- `reject if a or b` fails when one of its queries matches, as the specification says. biscuit-rust
+  passes the check when one of its queries has no match.
+- A block-level `trusting ...;` statement is kept in the block. biscuit-rust parses it and drops it.
+- A block with arrays, maps, `.get()` or `.try_or()` is written as version `6`. biscuit-rust writes
+  version `3`. The two are read.
+- These tokens are refused here and accepted by biscuit-rust: a protobuf message with a required
+  field that is missing, a version `3` block that uses datalog `v3.3` features, a P-256 key that is
+  not compressed, and a key with an algorithm that the schema does not define.
+- A rule that the authorizer itself adds, whose head has a variable that its body does not bind, is
+  an error. In biscuit-rust it makes no fact.
+- A rule and a query read the facts in the order in which they were added, and biscuit-rust reads
+  them in sorted order. The result is the same. When more than one fact makes an expression fail,
+  the execution error can be another one.
+- A block with protobuf messages nested more than 100 levels deep, for example 100 closures one
+  inside the other, is refused by the protobuf decoder of biscuit-rust. The decoder of this library
+  accepts 10000 levels, so such a token is read here.
+- Regular expressions have the syntax of the Go `regexp` package, not of the Rust `regex` crate.
+- A string is printed with `\"` and `\\`, so that the parser can read it again. biscuit-rust prints
+  the string as it is.
+- The two parsers do not accept exactly the same sources, see [the grammar](./parser/GRAMMAR.md).
+  When the two accept a source, they make the same block. This parser refuses a source with more
+  than 256 levels of nesting.
+- The step limit and the deserialization limits of biscuit-rust 7 are not implemented.
+
 ## Usage
 
 #### Create a biscuit
