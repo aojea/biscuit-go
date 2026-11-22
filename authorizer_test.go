@@ -325,6 +325,67 @@ func TestAuthorizeTimeLimitOnChecksAndPolicies(t *testing.T) {
 	}
 }
 
+// One expression has the time limit of the rules also. Closures in closures
+// on a collection, which a block of a token can have, stop with the timeout
+// of the run limits: in a check, in a rule and in a policy. `.try_or()` does
+// not replace the timeout with its other value.
+func TestAuthorizeTimeLimitOnClosures(t *testing.T) {
+	publicRoot, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
+	// [0, .., 99].all($a -> [0, .., 99].all($b -> [0, .., 99].all($c -> true)))
+	// applies a closure 1 010 100 times, which takes much more time than the
+	// default limit.
+	list := make(Array, 100)
+	for i := range list {
+		list[i] = Integer(i)
+	}
+	nested := Expression{Value{Bool(true)}}
+	for _, param := range []Variable{"c", "b", "a"} {
+		nested = Expression{Value{list}, Closure{Params: []Variable{param}, Body: nested}, BinaryAll}
+	}
+	guarded := Expression{Closure{Body: nested}, Value{Bool(true)}, BinaryTryOr}
+	query := func(e Expression) []Rule {
+		return []Rule{{Head: Predicate{Name: "query"}, Expressions: []Expression{e}}}
+	}
+	rule := Rule{
+		Head:        Predicate{Name: "g", IDs: []Term{Variable("u")}},
+		Body:        []Predicate{{Name: "user", IDs: []Term{Variable("u")}}},
+		Expressions: []Expression{nested},
+	}
+
+	builder := NewBuilder(privateRoot)
+	require.NoError(t, builder.AddAuthorityFact(Fact{Predicate{Name: "user", IDs: []Term{Integer(1)}}}))
+	token, err := builder.Build()
+	require.NoError(t, err)
+	with := func(add func(BlockBuilder) error) *Biscuit {
+		block := token.CreateBlock()
+		require.NoError(t, add(block))
+		appended, err := token.Append(rand.Reader, block.Build())
+		require.NoError(t, err)
+		return appended
+	}
+
+	for name, testCase := range map[string]struct {
+		token *Biscuit
+		add   func(Authorizer)
+	}{
+		"block check":             {with(func(b BlockBuilder) error { return b.AddCheck(Check{Queries: query(nested)}) }), func(Authorizer) {}},
+		"block check with try_or": {with(func(b BlockBuilder) error { return b.AddCheck(Check{Queries: query(guarded)}) }), func(Authorizer) {}},
+		"block rule":              {with(func(b BlockBuilder) error { return b.AddRule(rule) }), func(Authorizer) {}},
+		"authorizer check":        {token, func(a Authorizer) { a.AddCheck(Check{Queries: query(nested)}) }},
+		"policy":                  {token, func(a Authorizer) { a.AddPolicy(Policy{Kind: PolicyKindDeny, Queries: query(nested)}) }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, err := testCase.token.AuthorizerFrom(RootKey(publicRoot))
+			require.NoError(t, err)
+			testCase.add(a)
+			a.AddPolicy(DefaultAllowPolicy)
+			err = a.Authorize()
+			require.ErrorIs(t, err, datalog.ErrWorldRunLimitTimeout)
+			require.NotErrorIs(t, err, ErrExecution)
+		})
+	}
+}
+
 // biscuit-rust gives the symbols of the facts of the authorizer before those
 // of its rules, also when a rule is added first. The order of the symbols
 // is the order in which a check reads facts that have strings.

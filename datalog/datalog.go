@@ -283,7 +283,7 @@ func (r Rule) variables() MatchedVariables {
 // budget's deadline passes. A nil budget disables the limit.
 func (r Rule) apply(blockID BlockID, facts []factWithOrigin, syms *SymbolTable, externs ExternFuncs, budget *runBudget, emit func(Origin, Fact)) error {
 	return combine(r.variables(), r.Body, facts, budget, func(res match) (bool, error) {
-		ok, err := holds(r.Expressions, res.vars, syms, externs)
+		ok, err := holds(r.Expressions, res.vars, syms, externs, budget)
 		if err != nil || !ok {
 			return true, err
 		}
@@ -443,6 +443,7 @@ func WithMaxIterations(maxIterations int) WorldOption {
 // WithMaxDuration sets the time limit of Run. QueryMatch and QueryMatchAll
 // have the time that is left of the last Run: the rules, the checks and the
 // policies of an authorization share one time limit, as in biscuit-rust.
+// The limit stops a join, and the closures of an expression.
 func WithMaxDuration(maxDuration time.Duration) WorldOption {
 	return func(w *World) {
 		w.runLimits.maxDuration = maxDuration
@@ -743,13 +744,15 @@ func (w *World) QueryRule(rule Rule, blockID BlockID, trusted TrustedOrigins, sy
 // not made by a builder has a query with such a head.
 //
 // After a Run, the query has the time that is left of the time limit of
-// that Run: it returns ErrWorldRunLimitTimeout when its join is still at
-// work after it. A world that was not run has no time limit.
+// that Run: it returns ErrWorldRunLimitTimeout when its join or a closure
+// of its expressions is still at work after it. A world that was not run
+// has no time limit.
 func (w *World) QueryMatch(rule Rule, trusted TrustedOrigins, syms *SymbolTable) (bool, error) {
 	headBound := rule.Validate() == nil
 	found := false
-	err := combine(rule.variables(), rule.Body, w.candidates(trusted), w.queryBudget(), func(res match) (bool, error) {
-		ok, err := holds(rule.Expressions, res.vars, syms, w.externs)
+	budget := w.queryBudget()
+	err := combine(rule.variables(), rule.Body, w.candidates(trusted), budget, func(res match) (bool, error) {
+		ok, err := holds(rule.Expressions, res.vars, syms, w.externs, budget)
 		if err != nil {
 			return false, err
 		}
@@ -768,9 +771,10 @@ func (w *World) QueryMatch(rule Rule, trusted TrustedOrigins, syms *SymbolTable)
 // expressions do not hold. It has the time limit of QueryMatch.
 func (w *World) QueryMatchAll(rule Rule, trusted TrustedOrigins, syms *SymbolTable) (bool, error) {
 	found, all := false, true
-	err := combine(rule.variables(), rule.Body, w.candidates(trusted), w.queryBudget(), func(res match) (bool, error) {
+	budget := w.queryBudget()
+	err := combine(rule.variables(), rule.Body, w.candidates(trusted), budget, func(res match) (bool, error) {
 		found = true
-		ok, err := holds(rule.Expressions, res.vars, syms, w.externs)
+		ok, err := holds(rule.Expressions, res.vars, syms, w.externs, budget)
 		if err != nil {
 			return false, err
 		}
@@ -787,10 +791,11 @@ func (w *World) QueryMatchAll(rule Rule, trusted TrustedOrigins, syms *SymbolTab
 // is left of the time limit of the last Run. The rules, the checks and the
 // policies of an authorization share one time limit, as in biscuit-rust.
 //
-// The clock is read as the join does work, and not when the query starts: a
-// query that does little work never reads it. The limit is there to stop a
-// join that is too long. An authorization with small queries must not fail
-// because the process did not run for a moment between two of them.
+// The clock is read as the join and the closures of the expressions do
+// work, and not when the query starts: a query that does little work never
+// reads it. The limit is there to stop a join or an expression that is too
+// long. An authorization with small queries must not fail because the
+// process did not run for a moment between two of them.
 //
 // Each query has a budget of its own, so that it does not change the world.
 func (w *World) queryBudget() *runBudget {
@@ -967,13 +972,16 @@ var ErrNotBool = errors.New("datalog: expression does not evaluate to a boolean"
 // gets a symbol for this binding only, as in biscuit-rust. The table of the
 // world does not grow with each result, and the string does not change the
 // order of a set of strings that is read later.
-func holds(expressions []Expression, vars map[Variable]*Term, syms *SymbolTable, externs ExternFuncs) (bool, error) {
+//
+// budget is the time limit of the run or of the query, for the closures of
+// the expressions. A nil budget is no limit.
+func holds(expressions []Expression, vars map[Variable]*Term, syms *SymbolTable, externs ExternFuncs, budget *runBudget) (bool, error) {
 	if len(expressions) == 0 {
 		return true, nil
 	}
 	scratch := syms.scratch()
 	for _, e := range expressions {
-		res, err := e.EvaluateWith(vars, scratch, externs)
+		res, err := e.evaluate(vars, scratch, externs, budget)
 		if err != nil {
 			return false, err
 		}

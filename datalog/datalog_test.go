@@ -1141,6 +1141,105 @@ func TestWorldQueryMatchTimeLimit(t *testing.T) {
 	require.False(t, matched)
 }
 
+// One expression has the time limit of the run also: a closure reads the
+// clock as it does work. Without it, closures in closures have no limit:
+// three levels of .all() on 200 elements apply a closure 8 000 000 times,
+// and a block of a token can have such a check.
+func TestWorldClosureTimeLimit(t *testing.T) {
+	syms := &SymbolTable{}
+	const n = 40
+	list := make(Array, n)
+	for i := range list {
+		list[i] = Integer(i)
+	}
+	all := BinaryOp{BinaryOpFunc: All{}}
+	isTrue := Expression{Value{Bool(true)}}
+	// [0, .., n-1].all($x -> [0, .., n-1].all($y -> true))
+	nested := Expression{
+		Value{list},
+		Closure{Params: []Variable{1}, Body: Expression{Value{list}, Closure{Params: []Variable{2}, Body: isTrue}, all}},
+		all,
+	}
+	f := syms.Insert("f")
+	fact := Predicate{f, []Term{Integer(1)}}
+	query := func(e Expression) Rule {
+		return Rule{Head: Predicate{syms.Insert("q"), nil}, Body: []Predicate{fact}, Expressions: []Expression{e}}
+	}
+	w := NewWorld()
+	w.AddFact(testOrigin, Fact{fact})
+	start := time.Unix(0, 0)
+	polls := 0
+	// expireAfter makes the clock go past the time limit after n readings.
+	expireAfter := func(w *World, n int) {
+		polls = 0
+		w.clock = func() time.Time {
+			if polls++; polls > n {
+				return start.Add(time.Hour)
+			}
+			return start
+		}
+	}
+
+	// A world that was not run has no time limit.
+	expireAfter(w, 0)
+	matched, err := w.QueryMatch(query(nested), testTrusted, syms)
+	require.NoError(t, err)
+	require.True(t, matched)
+
+	// The time limit starts with Run. The closures read the clock as they
+	// do work. The error is that of a join: it is not wrapped as an error of
+	// the expression.
+	w.clock = func() time.Time { return start }
+	require.NoError(t, w.Run(syms))
+	expireAfter(w, 2)
+	_, err = w.QueryMatch(query(nested), testTrusted, syms)
+	require.Equal(t, ErrWorldRunLimitTimeout, err)
+	require.Equal(t, 3, polls)
+	expireAfter(w, 2)
+	_, err = w.QueryMatchAll(query(nested), testTrusted, syms)
+	require.ErrorIs(t, err, ErrWorldRunLimitTimeout)
+	require.Equal(t, 3, polls)
+
+	// .try_or() does not replace the time limit with its other value, and
+	// && and || have the limit for their right side.
+	for name, e := range map[string]Expression{
+		"try_or": {Closure{Body: nested}, Value{Bool(true)}, BinaryOp{BinaryOpFunc: TryOr{}}},
+		"and":    {Value{Bool(true)}, Closure{Body: nested}, BinaryOp{BinaryOpFunc: LazyAnd{}}},
+		"or":     {Value{Bool(false)}, Closure{Body: nested}, BinaryOp{BinaryOpFunc: LazyOr{}}},
+	} {
+		expireAfter(w, 2)
+		_, err = w.QueryMatch(query(e), testTrusted, syms)
+		require.ErrorIs(t, err, ErrWorldRunLimitTimeout, name)
+	}
+
+	// An expression that does little work does not read the clock.
+	expireAfter(w, 0)
+	small := Expression{Value{Array{Integer(1)}}, Closure{Params: []Variable{1}, Body: isTrue}, all}
+	matched, err = w.QueryMatch(query(small), testTrusted, syms)
+	require.NoError(t, err)
+	require.True(t, matched)
+	require.Equal(t, 0, polls)
+
+	// With time left, the closure is applied to all the elements.
+	w.clock = func() time.Time { return start }
+	matched, err = w.QueryMatch(query(nested), testTrusted, syms)
+	require.NoError(t, err)
+	require.True(t, matched)
+
+	// The expression of a rule has the limit in Run. Run reads the clock
+	// 3 times for this world when the closures do not read it.
+	run := NewWorld()
+	run.AddFact(testOrigin, Fact{fact})
+	rule := query(nested)
+	rule.Head = Predicate{syms.Insert("g"), []Term{Integer(1)}}
+	run.AddRule(0, testTrusted, rule)
+	expireAfter(run, 10)
+	require.ErrorIs(t, run.Run(syms), ErrWorldRunLimitTimeout)
+	require.Equal(t, 11, polls)
+	run.clock = func() time.Time { return start }
+	require.NoError(t, run.Run(syms))
+}
+
 // A timeout must leave the world exactly as some completed iteration left it,
 // never with part of the facts the interrupted iteration derived. The clock
 // is faked to expire at every poll in turn, so every point where Run can
