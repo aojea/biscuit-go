@@ -472,25 +472,36 @@ func (v *authorizer) LoadPolicies(authorizerPolicies []byte) error {
 	}
 }
 
+// loadPoliciesV2 adds the facts and the rules of the saved policies to those
+// of the authorizer, and puts their checks and their policies in place of
+// its own. The saved content has its own symbol table: each item is
+// translated to the table of the authorizer, which keeps the symbols of the
+// token and of the facts that it already has.
 func (v *authorizer) loadPoliciesV2(pbPolicies *pb.AuthorizerPolicies) error {
-	policySymbolTable := datalog.SymbolTable(pbPolicies.Symbols)
-	v.symbols = v.baseSymbols.Clone()
-	v.symbols.Extend(&policySymbolTable)
+	symbols := datalog.SymbolTable(pbPolicies.Symbols)
 
 	for _, pbFact := range pbPolicies.Facts {
-		fact, err := protoFactToTokenFactV2(pbFact)
+		dlFact, err := protoFactToTokenFactV2(pbFact)
 		if err != nil {
 			return fmt.Errorf("verifier: load policies v1: failed to convert datalog fact: %w", err)
 		}
-		v.world.AddFact(authorizerOrigin, *fact)
+		fact, err := fromDatalogFact(&symbols, *dlFact)
+		if err != nil {
+			return fmt.Errorf("verifier: load policies v1: failed to convert fact: %w", err)
+		}
+		v.AddFact(*fact)
 	}
 
 	for _, pbRule := range pbPolicies.Rules {
-		rule, err := protoRuleToTokenRuleV2(pbRule, nil)
+		dlRule, err := protoRuleToTokenRuleV2(pbRule, nil)
 		if err != nil {
 			return fmt.Errorf("verifier: load policies v1: failed to convert datalog rule: %w", err)
 		}
-		v.rules = append(v.rules, *rule)
+		rule, err := fromDatalogRule(&symbols, *dlRule)
+		if err != nil {
+			return fmt.Errorf("verifier: load policies v1: failed to convert rule: %w", err)
+		}
+		v.AddRule(*rule)
 	}
 
 	v.checks = make([]Check, len(pbPolicies.Checks))
@@ -499,7 +510,7 @@ func (v *authorizer) loadPoliciesV2(pbPolicies *pb.AuthorizerPolicies) error {
 		if err != nil {
 			return fmt.Errorf("verifier: load policies v1: failed to convert datalog check: %w", err)
 		}
-		check, err := fromDatalogCheck(v.symbols, *dlCheck)
+		check, err := fromDatalogCheck(&symbols, *dlCheck)
 		if err != nil {
 			return fmt.Errorf("verifier: load policies v1: failed to convert check: %w", err)
 		}
@@ -525,7 +536,7 @@ func (v *authorizer) loadPoliciesV2(pbPolicies *pb.AuthorizerPolicies) error {
 				return fmt.Errorf("verifier: load policies v1: failed to convert datalog policy rule: %w", err)
 			}
 
-			rule, err := fromDatalogRule(v.symbols, *dlRule)
+			rule, err := fromDatalogRule(&symbols, *dlRule)
 			if err != nil {
 				return fmt.Errorf("verifier: load policies v1: failed to convert policy rule: %w", err)
 			}

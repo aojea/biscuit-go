@@ -247,3 +247,41 @@ func TestVerifierSerializeLoad(t *testing.T) {
 	require.Equal(t, v1.(*authorizer).checks, v2.(*authorizer).checks)
 	require.Equal(t, v1.(*authorizer).policies, v2.(*authorizer).policies)
 }
+
+// The saved policies have their own symbol table. LoadPolicies translates
+// them to the table of the authorizer: the strings of the token, and of a
+// fact that the authorizer has before the load, stay what they are.
+func TestLoadPoliciesKeepsSymbols(t *testing.T) {
+	publicRoot, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
+	fact := func(name, value string) Fact {
+		return Fact{Predicate{Name: name, IDs: []Term{String(value)}}}
+	}
+	authorizer := func(name string) Authorizer {
+		builder := NewBuilder(privateRoot)
+		require.NoError(t, builder.AddAuthorityFact(fact(name, name+"_value")))
+		token, err := builder.Build()
+		require.NoError(t, err)
+		a, err := token.AuthorizerFrom(RootKey(publicRoot))
+		require.NoError(t, err)
+		return a
+	}
+
+	saver := authorizer("first")
+	saver.AddFact(fact("resource", "file1"))
+	saver.AddCheck(Check{Queries: []Rule{{
+		Head: Predicate{Name: "query"},
+		Body: []Predicate{{Name: "resource", IDs: []Term{String("file1")}}},
+	}}})
+	saver.AddPolicy(DefaultAllowPolicy)
+	saved, err := saver.SerializePolicies()
+	require.NoError(t, err)
+
+	loader := authorizer("second")
+	loader.AddFact(fact("before", "load"))
+	require.NoError(t, loader.LoadPolicies(saved))
+	require.NoError(t, loader.Authorize())
+	world := loader.PrintWorld()
+	for _, want := range []string{`second("second_value")`, `before("load")`, `resource("file1")`} {
+		require.Contains(t, world, want)
+	}
+}
