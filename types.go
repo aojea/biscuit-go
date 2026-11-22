@@ -39,7 +39,9 @@ const (
 	allV33Features v33Features = true
 	// rustV33Features leaves out arrays, maps, .get() and .try_or(), which
 	// biscuit-rust does not count when it computes the version of a block:
-	// it writes them in blocks of version 3 to 5, and these must be read.
+	// it writes arrays, maps and .get() in blocks of version 3 to 5, and
+	// these must be read. The receiver of .try_or() is a closure, which it
+	// counts.
 	rustV33Features v33Features = false
 )
 

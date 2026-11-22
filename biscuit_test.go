@@ -791,7 +791,8 @@ func TestBlockVersionFromContent(t *testing.T) {
 	require.ErrorContains(t, err, "public key index 0 out of the key table")
 
 	// biscuit-rust does not count arrays, maps, .get() and .try_or() in the
-	// version of a block: it writes them in a v3 block, which must be read.
+	// version of a block: it writes arrays, maps and .get() in a v3 block,
+	// which must be read.
 	// A block that this library builds with one of them declares version 6.
 	fact := func(term *pb.Term) *pb.Block {
 		return &pb.Block{
