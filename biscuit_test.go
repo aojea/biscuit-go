@@ -532,6 +532,63 @@ func TestInvalidBlockRule(t *testing.T) {
 	require.ErrorContains(t, err, "block 1: right($op) <- resource($file)")
 }
 
+// The rules are examined before the world gets a fact: a token that is
+// refused leaves nothing to query. A rule of the authorizer with such a head
+// is refused in the same way, also when it matches nothing, and a query too.
+func TestInvalidRuleIsRefusedBeforeLoad(t *testing.T) {
+	publicRoot, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
+	builder := NewBuilder(privateRoot)
+	require.NoError(t, builder.AddAuthorityFact(Fact{Predicate{Name: "resource", IDs: []Term{String("file1")}}}))
+	token, err := builder.Build()
+	require.NoError(t, err)
+
+	unbound := func(body string) Rule {
+		return Rule{
+			Head: Predicate{Name: "right", IDs: []Term{Variable("file"), Variable("op")}},
+			Body: []Predicate{{Name: body, IDs: []Term{Variable("file")}}},
+		}
+	}
+	resources := Rule{
+		Head: Predicate{Name: "query", IDs: []Term{Variable("file")}},
+		Body: []Predicate{{Name: "resource", IDs: []Term{Variable("file")}}},
+	}
+
+	for _, body := range []string{"resource", "nothing"} {
+		a, err := token.AuthorizerFrom(RootKey(publicRoot))
+		require.NoError(t, err)
+		a.AddRule(unbound(body))
+		a.AddPolicy(DefaultAllowPolicy)
+		err = a.Authorize()
+		require.ErrorIs(t, err, ErrInvalidBlockRule, body)
+		require.ErrorContains(t, err, "authorizer: right($file, $op) <- "+body+"($file)")
+		require.NotContains(t, a.PrintWorld(), "file1", body)
+		_, err = a.Query(resources)
+		require.ErrorIs(t, err, ErrInvalidBlockRule, body)
+	}
+
+	a, err := token.AuthorizerFrom(RootKey(publicRoot))
+	require.NoError(t, err)
+	_, err = a.Query(unbound("resource"))
+	require.ErrorIs(t, err, ErrInvalidBlockRule)
+	facts, err := a.Query(resources)
+	require.NoError(t, err)
+	require.Len(t, facts, 1)
+
+	// A token of another implementation with such a rule, after a fact.
+	symbols := token.authority.symbolTable(token.symbols)
+	token.authority.rules = append(token.authority.rules, datalog.Rule{
+		Head: datalog.Predicate{Name: symbols.Insert("right"), Terms: []datalog.Term{datalog.Variable(symbols.Insert("op"))}},
+		Body: []datalog.Predicate{{Name: symbols.Insert("resource"), Terms: []datalog.Term{datalog.Variable(symbols.Insert("file"))}}},
+	})
+	a, err = token.AuthorizerFrom(RootKey(publicRoot))
+	require.NoError(t, err)
+	a.AddPolicy(DefaultAllowPolicy)
+	require.ErrorIs(t, a.Authorize(), ErrInvalidBlockRule)
+	require.NotContains(t, a.PrintWorld(), "file1")
+	_, err = a.Query(resources)
+	require.ErrorIs(t, err, ErrInvalidBlockRule)
+}
+
 // reject if passes when its query has no match; a block with one is v6.
 func TestBiscuitRejectIf(t *testing.T) {
 	publicRoot, privateRoot, _ := ed25519.GenerateKey(rand.Reader)

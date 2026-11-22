@@ -216,13 +216,33 @@ func (v *authorizer) AddRule(rule Rule) {
 // authorizer, which may be added after the rule: they are resolved here,
 // not in AddRule.
 func (v *authorizer) load() ([]datalog.TrustedOrigins, error) {
+	blocks := append([]*Block{v.biscuit.authority}, v.biscuit.blocks...)
+
+	// A rule whose head has a variable that the body does not bind cannot
+	// generate a fact. It is refused also when it matches nothing, as
+	// biscuit-rust does for the rules of a token, and before the world gets
+	// a fact: a token that is refused leaves nothing to query.
+	for i, block := range blocks {
+		for _, rule := range block.rules {
+			if rule.Validate() != nil {
+				debug := datalog.SymbolDebugger{SymbolTable: block.symbolTable(v.biscuit.symbols)}
+				return nil, fmt.Errorf("%w: block %d: %s", ErrInvalidBlockRule, i, debug.Rule(rule))
+			}
+		}
+	}
+	for _, r := range v.rules {
+		if r.Validate() != nil {
+			debug := datalog.SymbolDebugger{SymbolTable: v.symbols}
+			return nil, fmt.Errorf("%w: authorizer: %s", ErrInvalidBlockRule, debug.Rule(r))
+		}
+	}
+
 	v.world.ResetRules()
 	defaults := v.authorizerTrustedOrigins()
 	for _, r := range v.rules {
 		v.world.AddRule(datalog.AuthorizerBlockID, v.trustedOrigins(r.Scopes, defaults, datalog.AuthorizerBlockID), r)
 	}
 
-	blocks := append([]*Block{v.biscuit.authority}, v.biscuit.blocks...)
 	blockTrusted := make([]datalog.TrustedOrigins, len(blocks))
 	for i, block := range blocks {
 		blockID := datalog.BlockID(i)
@@ -237,11 +257,6 @@ func (v *authorizer) load() ([]datalog.TrustedOrigins, error) {
 		}
 
 		for _, rule := range block.rules {
-			// As biscuit-rust does, also when the rule matches nothing.
-			if err := rule.Validate(); err != nil {
-				debug := datalog.SymbolDebugger{SymbolTable: symbols}
-				return nil, fmt.Errorf("%w: block %d: %s", ErrInvalidBlockRule, i, debug.Rule(rule))
-			}
 			r, err := fromDatalogRule(symbols, rule)
 			if err != nil {
 				return nil, fmt.Errorf("biscuit: verification failed: %s", err)
@@ -279,15 +294,13 @@ func (v *authorizer) AddPolicy(policy Policy) {
 var authorizerOrigin = datalog.NewOrigin(datalog.AuthorizerBlockID)
 
 // runError wraps an error of the expressions of a rule in ErrExecution, as
-// for the expressions of a check or a policy. The run limits and a rule that
-// is not valid are not errors of an expression.
+// for the expressions of a check or a policy. The run limits are not errors
+// of an expression.
 func runError(err error) error {
-	var invalidRule datalog.InvalidRuleError
 	switch {
 	case errors.Is(err, datalog.ErrWorldRunLimitMaxFacts),
 		errors.Is(err, datalog.ErrWorldRunLimitMaxIterations),
-		errors.Is(err, datalog.ErrWorldRunLimitTimeout),
-		errors.As(err, &invalidRule):
+		errors.Is(err, datalog.ErrWorldRunLimitTimeout):
 		return err
 	}
 	return fmt.Errorf("%w: %w", ErrExecution, err)
@@ -440,6 +453,9 @@ func (v *authorizer) checkPasses(c datalog.Check, blockID datalog.BlockID, defau
 }
 
 func (v *authorizer) Query(rule Rule) (FactSet, error) {
+	if err := rule.validate(); err != nil {
+		return nil, err
+	}
 	if _, err := v.load(); err != nil {
 		return nil, err
 	}
