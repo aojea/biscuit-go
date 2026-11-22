@@ -239,6 +239,55 @@ func TestAuthorizerQueryLoadsToken(t *testing.T) {
 	require.ElementsMatch(t, []Term{String("file1"), String("file2")}, rights(a))
 }
 
+// biscuit-rust gives the symbols of the facts of the authorizer before those
+// of its rules, also when a rule is added first. The order of the symbols
+// is the order in which a check reads facts that have strings.
+func TestAuthorizerRuleSymbolsAfterFacts(t *testing.T) {
+	publicRoot, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
+	token, err := NewBuilder(privateRoot).Build()
+	require.NoError(t, err)
+
+	// seen($s) <- other($s), $s != "x"
+	rule := Rule{
+		Head:        Predicate{Name: "seen", IDs: []Term{Variable("s")}},
+		Body:        []Predicate{{Name: "other", IDs: []Term{Variable("s")}}},
+		Expressions: []Expression{{Value{Variable("s")}, Value{String("x")}, BinaryNotEqual}},
+	}
+	// check if f($s, $t), 10 / $t > 4
+	check := Check{Queries: []Rule{{
+		Head: Predicate{Name: "query"},
+		Body: []Predicate{{Name: "f", IDs: []Term{Variable("s"), Variable("t")}}},
+		Expressions: []Expression{{
+			Value{Integer(10)}, Value{Variable("t")}, BinaryDiv, Value{Integer(4)}, BinaryGreaterThan,
+		}},
+	}}}
+	authorize := func(save bool, facts ...Fact) error {
+		a, err := token.AuthorizerFrom(RootKey(publicRoot))
+		require.NoError(t, err)
+		a.AddRule(rule)
+		a.AddCheck(check)
+		a.AddPolicy(DefaultAllowPolicy)
+		if save {
+			_, err := a.SerializePolicies()
+			require.NoError(t, err)
+		}
+		for _, fact := range facts {
+			a.AddFact(fact)
+		}
+		return a.Authorize()
+	}
+	x := Fact{Predicate{Name: "f", IDs: []Term{String("x"), Integer(1)}}}
+	y := Fact{Predicate{Name: "f", IDs: []Term{String("y"), Integer(0)}}}
+
+	// "y" is the first string of the facts: f("y", 0) is read first, also
+	// with "x" in a rule that was added before, and also when the policies
+	// are saved before the facts are added.
+	require.ErrorIs(t, authorize(false, y, x), datalog.ErrExprDivByZero)
+	require.ErrorIs(t, authorize(true, y, x), datalog.ErrExprDivByZero)
+	// "x" is the first string: f("x", 1) is read first, and it matches.
+	require.NoError(t, authorize(false, x, y))
+}
+
 func TestVerifierPolicies(t *testing.T) {
 	rng := rand.Reader
 	publicRoot, privateRoot, _ := ed25519.GenerateKey(rng)

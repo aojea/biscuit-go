@@ -58,9 +58,11 @@ type authorizer struct {
 	// facts are the facts that were added to the authorizer, in order. The
 	// world has them too: this list is for the print of the world.
 	facts []Fact
-	// rules are the rules of the authorizer. They are put in the world each
-	// time it is run, once the scopes they default to are known.
-	rules []datalog.Rule
+	// rules are the rules of the authorizer. They get their symbols and are
+	// put in the world each time it is run: after the facts of the
+	// authorizer, as in biscuit-rust, and once the scopes they default to
+	// are known.
+	rules []Rule
 
 	// blocksByKey maps the public key of a third-party block, as printed
 	// by datalog.PublicKey.String, to the blocks it signed; `trusting <key>`
@@ -207,7 +209,7 @@ func (v *authorizer) AddFact(fact Fact) {
 }
 
 func (v *authorizer) AddRule(rule Rule) {
-	v.rules = append(v.rules, rule.convert(v.symbols))
+	v.rules = append(v.rules, rule)
 }
 
 // load puts in the world the rules of the authorizer, and the facts and the
@@ -216,9 +218,13 @@ func (v *authorizer) AddRule(rule Rule) {
 // content: the rules of the token apply to a fact that is added between two
 // runs, and Query reads the token also before Authorize.
 //
-// The origins a rule of the authorizer trusts depend on the scopes of the
-// authorizer, which may be added after the rule: they are resolved here,
-// not in AddRule.
+// The rules of the authorizer get their symbols here and not in AddRule.
+// biscuit-rust gives the symbols of the facts of the authorizer before those
+// of its rules, also when a rule is added first: the order of the symbols
+// is the order in which a check reads the facts and a closure reads a set
+// of strings. The origins that a rule trusts depend on the scopes of the
+// authorizer, which may be added after the rule: they are resolved here
+// too.
 func (v *authorizer) load() ([]datalog.TrustedOrigins, error) {
 	blocks := append([]*Block{v.biscuit.authority}, v.biscuit.blocks...)
 
@@ -234,7 +240,11 @@ func (v *authorizer) load() ([]datalog.TrustedOrigins, error) {
 			}
 		}
 	}
-	for _, r := range v.rules {
+	rules := make([]datalog.Rule, len(v.rules))
+	for i, rule := range v.rules {
+		rules[i] = rule.convert(v.symbols)
+	}
+	for _, r := range rules {
 		if r.Validate() != nil {
 			debug := datalog.SymbolDebugger{SymbolTable: v.symbols}
 			return nil, fmt.Errorf("%w: authorizer: %s", ErrInvalidBlockRule, debug.Rule(r))
@@ -243,7 +253,7 @@ func (v *authorizer) load() ([]datalog.TrustedOrigins, error) {
 
 	v.world.ResetRules()
 	defaults := v.authorizerTrustedOrigins()
-	for _, r := range v.rules {
+	for _, r := range rules {
 		v.world.AddRule(datalog.AuthorizerBlockID, v.trustedOrigins(r.Scopes, defaults, datalog.AuthorizerBlockID), r)
 	}
 
@@ -523,11 +533,7 @@ func (v *authorizer) snapshot() (*datalog.SymbolTable, *datalog.World, error) {
 	for _, fact := range v.facts {
 		fact.convert(symbols)
 	}
-	for _, r := range v.rules {
-		rule, err := fromDatalogRule(v.symbols, r)
-		if err != nil {
-			return nil, nil, err
-		}
+	for _, rule := range v.rules {
 		rule.convert(symbols)
 	}
 	for _, check := range v.checks {
@@ -664,6 +670,12 @@ func (v *authorizer) SerializePolicies() ([]byte, error) {
 		return nil, errors.New("verifier: can't serialize after world has been run")
 	}
 
+	// The rules, the checks and the policies get their symbols in a copy
+	// of the table: the table of the authorizer does not change, so a fact
+	// that is added later has its symbols before theirs, as when the
+	// policies are not saved.
+	symbols := v.symbols.Clone()
+
 	// Only what the authorizer added itself is saved; the token is not part
 	// of the policies.
 	var protoFacts []*pb.Fact
@@ -690,14 +702,14 @@ func (v *authorizer) SerializePolicies() ([]byte, error) {
 		return nil
 	}
 	for _, rule := range v.rules {
-		if err := addRule(rule); err != nil {
+		if err := addRule(rule.convert(symbols)); err != nil {
 			return nil, err
 		}
 	}
 
 	protoChecks := make([]*pb.Check, len(v.checks))
 	for i, check := range v.checks {
-		protoCheck, err := tokenCheckToProtoCheckV2(check.convert(v.symbols), nil)
+		protoCheck, err := tokenCheckToProtoCheckV2(check.convert(symbols), nil)
 		if err != nil {
 			return nil, fmt.Errorf("verifier: failed to convert check: %w", err)
 		}
@@ -720,7 +732,7 @@ func (v *authorizer) SerializePolicies() ([]byte, error) {
 
 		protoPolicy.Queries = make([]*pb.Rule, len(policy.Queries))
 		for j, rule := range policy.Queries {
-			protoRule, err := tokenRuleToProtoRuleV2(rule.convert(v.symbols), nil)
+			protoRule, err := tokenRuleToProtoRuleV2(rule.convert(symbols), nil)
 			if err != nil {
 				return nil, fmt.Errorf("verifier: failed to convert policy rule: %w", err)
 			}
@@ -730,13 +742,13 @@ func (v *authorizer) SerializePolicies() ([]byte, error) {
 		protoPolicies[i] = protoPolicy
 	}
 
-	if err := checkUTF8(*v.symbols, ""); err != nil {
+	if err := checkUTF8(*symbols, ""); err != nil {
 		return nil, fmt.Errorf("verifier: serialize policies: %w", err)
 	}
 
 	version := MaxSchemaVersion
 	return proto.Marshal(&pb.AuthorizerPolicies{
-		Symbols:  *v.symbols.Clone(),
+		Symbols:  *symbols,
 		Version:  proto.Uint32(version),
 		Facts:    protoFacts,
 		Rules:    protoRules,
