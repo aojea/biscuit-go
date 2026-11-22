@@ -879,9 +879,18 @@ var ErrNotBool = errors.New("datalog: expression does not evaluate to a boolean"
 // holds evaluates the expressions of a rule for one binding, in order, up to
 // the first one that is false. An expression that does not evaluate to a
 // boolean is an error, as in biscuit-rust: it is not a binding that fails.
+//
+// A string that an expression makes, with +, .type() or an extern function,
+// gets a symbol for this binding only, as in biscuit-rust. The table of the
+// world does not grow with each result, and the string does not change the
+// order of a set of strings that is read later.
 func holds(expressions []Expression, vars map[Variable]*Term, syms *SymbolTable, externs ExternFuncs) (bool, error) {
+	if len(expressions) == 0 {
+		return true, nil
+	}
+	scratch := syms.scratch()
 	for _, e := range expressions {
-		res, err := e.EvaluateWith(vars, syms, externs)
+		res, err := e.EvaluateWith(vars, scratch, externs)
 		if err != nil {
 			return false, err
 		}

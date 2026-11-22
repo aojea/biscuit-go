@@ -731,6 +731,42 @@ func TestWorldQueryStopsAtFirstMatch(t *testing.T) {
 	require.Len(t, *facts, 2)
 }
 
+// A string that an expression makes gets a symbol for one binding only: the
+// table of the world does not grow, and the string does not change the order
+// of a set of strings that is read later.
+func TestExpressionStringIsTemporary(t *testing.T) {
+	syms := &SymbolTable{}
+	x, y := syms.Insert("x"), syms.Insert("y")
+	value := syms.Insert("value")
+	// value($v), "x" + "y" !== $v, $v.type() !== "x"
+	rule := Rule{
+		Head: Predicate{syms.Insert("ok"), []Term{Variable(0)}},
+		Body: []Predicate{{value, []Term{Variable(0)}}},
+		Expressions: []Expression{
+			{Value{x}, Value{y}, BinaryOp{Add{}}, Value{Variable(0)}, BinaryOp{NotEqual{}}},
+			{Value{Variable(0)}, UnaryOp{TypeOf{}}, Value{x}, BinaryOp{NotEqual{}}},
+		},
+	}
+	w := NewWorld()
+	w.AddFact(testOrigin, Fact{Predicate{value, []Term{x}}})
+	w.AddFact(testOrigin, Fact{Predicate{value, []Term{y}}})
+	w.AddRule(0, testTrusted, rule)
+	before := slices.Clone(*syms)
+
+	require.NoError(t, w.Run(syms))
+	matched, err := w.QueryMatch(rule, testTrusted, syms)
+	require.NoError(t, err)
+	require.True(t, matched)
+	all, err := w.QueryMatchAll(rule, testTrusted, syms)
+	require.NoError(t, err)
+	require.True(t, all)
+	facts, err := w.QueryRule(rule, 0, testTrusted, syms)
+	require.NoError(t, err)
+	require.Len(t, *facts, 2)
+
+	require.Equal(t, before, *syms)
+}
+
 // An expression of a rule that does not evaluate to a boolean is an error,
 // as in biscuit-rust, and not a match that fails.
 func TestWorldExpressionNotBool(t *testing.T) {

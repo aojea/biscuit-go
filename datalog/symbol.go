@@ -128,6 +128,17 @@ func (t *SymbolTable) Clone() *SymbolTable {
 	return &newTable
 }
 
+// scratch returns a table that has the symbols of t and that the evaluation
+// of an expression can add to, without a change to t. The symbols are not
+// copied: the first symbol that is added makes the copy.
+func (t *SymbolTable) scratch() *SymbolTable {
+	if t == nil {
+		return nil
+	}
+	s := (*t)[:len(*t):len(*t)]
+	return &s
+}
+
 // SplitOff returns a newly allocated slice containing the elements in the range
 // [at, len). After the call, the receiver will be left containing
 // the elements [0, at) with its previous capacity unchanged.
