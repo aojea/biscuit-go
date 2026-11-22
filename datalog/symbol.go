@@ -178,7 +178,9 @@ type SymbolDebugger struct {
 }
 
 // Term prints a term, resolving strings and variables through the symbol
-// table, including inside sets.
+// table, including inside sets. The elements of a set are in the order of
+// biscuit-rust: integers by value, strings by their index in the symbol
+// table.
 func (d SymbolDebugger) Term(t Term) string {
 	switch t := t.(type) {
 	case String:
@@ -190,10 +192,9 @@ func (d SymbolDebugger) Term(t Term) string {
 			return "{,}"
 		}
 		elts := make([]string, len(t))
-		for i, e := range t {
+		for i, e := range sortedSet(t) {
 			elts[i] = d.Term(e)
 		}
-		sort.Strings(elts)
 		return fmt.Sprintf("{%s}", strings.Join(elts, ", "))
 	case Array:
 		elts := make([]string, len(t))

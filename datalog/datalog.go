@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 )
@@ -55,6 +54,11 @@ var (
 	_ Term = Map(nil)
 )
 
+// Set is a set of terms. NewSet makes it in the form that biscuit-rust
+// keeps: the elements in order, each one once. A Set that is made in another
+// way can have its elements in any order: Equal, the print and the closures
+// of .any() and .all() do not depend on it. An element that is in it twice
+// is counted twice.
 type Set []Term
 
 func (Set) Type() TermType { return TermTypeSet }
@@ -89,14 +93,13 @@ func (s Set) Equal(t Term) bool {
 	return true
 }
 func (s Set) String() string {
-	eltStr := make([]string, 0, len(s))
-	for _, e := range s {
-		eltStr = append(eltStr, e.String())
-	}
-	if len(eltStr) == 0 {
+	if len(s) == 0 {
 		return "{,}"
 	}
-	sort.Strings(eltStr)
+	eltStr := make([]string, 0, len(s))
+	for _, e := range sortedSet(s) {
+		eltStr = append(eltStr, e.String())
+	}
 	return fmt.Sprintf("{%s}", strings.Join(eltStr, ", "))
 }
 func (s Set) Intersect(t Set) Set {

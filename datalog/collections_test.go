@@ -35,6 +35,49 @@ func TestArrayAndMapTerms(t *testing.T) {
 	require.Equal(t, "{}", dbg.Term(Map{}))
 }
 
+// A set has the order of biscuit-rust: the elements by value, a string by
+// its index in the symbol table and not by its text. This order is the
+// order of the print and the order in which .any() and .all() see the
+// elements.
+func TestSetOrder(t *testing.T) {
+	syms := &SymbolTable{}
+	dbg := SymbolDebugger{syms}
+	y, x := syms.Insert("y"), syms.Insert("x")
+
+	require.Equal(t, Set{Integer(-1), Integer(9), Integer(10)}, NewSet(Integer(10), Integer(9), Integer(-1), Integer(9)))
+	require.Equal(t, Set{y, x}, NewSet(x, y, x))
+	require.Equal(t, Set{Bool(false), Bool(true)}, NewSet(Bool(true), Bool(false)))
+	require.Equal(t, Set{Bytes{1}, Bytes{1, 0}, Bytes{2}}, NewSet(Bytes{2}, Bytes{1, 0}, Bytes{1}))
+	require.Equal(t, Set{Array{Integer(1)}, Array{Integer(1), Integer(0)}, Array{Integer(2)}},
+		NewSet(Array{Integer(2)}, Array{Integer(1), Integer(0)}, Array{Integer(1)}))
+	require.Equal(t, Set{}, NewSet())
+
+	// A set that is not in order prints in order, and stays as it is.
+	set := Set{Integer(10), Integer(9), Integer(-1)}
+	require.Equal(t, "{-1, 9, 10}", set.String())
+	require.Equal(t, "{-1, 9, 10}", dbg.Term(set))
+	require.Equal(t, Set{Integer(10), Integer(9), Integer(-1)}, set)
+	require.Equal(t, `{"y", "x"}`, dbg.Term(Set{x, y}))
+
+	// {2, 1}.any($p -> 1 / ($p - 1) == 1): 1 comes first and fails. In the
+	// order of the source, 2 would match and the error would not show.
+	p := Variable(syms.Insert("p"))
+	div := Expression{
+		Value{Integer(1)}, Value{p}, Value{Integer(1)}, BinaryOp{Sub{}}, BinaryOp{Div{}},
+		Value{Integer(1)}, BinaryOp{Equal{}},
+	}
+	anyExpr := Expression{Value{Set{Integer(2), Integer(1)}}, Closure{Params: []Variable{p}, Body: div}, BinaryOp{Any{}}}
+	_, err := anyExpr.Evaluate(nil, syms)
+	require.ErrorIs(t, err, ErrExprDivByZero)
+
+	// {3, 2}.all($p -> 1 / ($p - 3) == 1): 2 comes first and is false.
+	div[2] = Value{Integer(3)}
+	allExpr := Expression{Value{Set{Integer(3), Integer(2)}}, Closure{Params: []Variable{p}, Body: div}, BinaryOp{All{}}}
+	res, err := allExpr.Evaluate(nil, syms)
+	require.NoError(t, err)
+	require.Equal(t, Bool(false), res)
+}
+
 func TestArrayAndMapOperators(t *testing.T) {
 	syms := &SymbolTable{}
 	a, b, c := syms.Insert("a"), syms.Insert("b"), syms.Insert("c")

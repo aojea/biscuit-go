@@ -223,7 +223,9 @@ func protoIDToTokenIDV2(input *pb.Term) (*datalog.Term, error) {
 			}
 			datalogSet = append(datalogSet, *datalogElt)
 		}
-		id = datalogSet
+		// biscuit-rust keeps the elements sorted and has each element once,
+		// whatever the token has.
+		id = datalog.NewSet(datalogSet...)
 	case *pb.Term_Array:
 		elts := input.GetArray().GetArray()
 		array := make(datalog.Array, len(elts))

@@ -1170,12 +1170,15 @@ func forEachElement(name string, collection Term, closure Closure, values map[Va
 	return exhausted, nil
 }
 
-// collectionElements lists the elements a closure iterates over: the
-// elements of a set or an array, or [key, value] arrays for a map.
+// collectionElements lists the elements a closure iterates over, in the
+// order of biscuit-rust: the elements of a set in the order of their value,
+// those of an array in the order of the array, and [key, value] arrays for a
+// map in the order of the keys. The order decides which element stops
+// .any() or .all(), and thus if a later element can fail.
 func collectionElements(t Term) ([]Term, error) {
 	switch t := t.(type) {
 	case Set:
-		return t, nil
+		return sortedSet(t), nil
 	case Array:
 		return t, nil
 	case Map:

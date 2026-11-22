@@ -721,6 +721,18 @@ func TestConvertEmptySetV2(t *testing.T) {
 	require.Equal(t, datalog.Set{}, *tokenSet)
 }
 
+// A token can have the elements of a set in any order, and an element more
+// than once. As biscuit-rust does, the set that is read has each element
+// once, in order: .length() and the print do not depend on the token.
+func TestConvertSetIsCanonicalV2(t *testing.T) {
+	integer := func(i int64) *pb.Term { return &pb.Term{Content: &pb.Term_Integer{Integer: i}} }
+	protoSet := &pb.Term{Content: &pb.Term_Set{Set: &pb.TermSet{Set: []*pb.Term{integer(10), integer(9), integer(10), integer(-1)}}}}
+
+	tokenSet, err := protoIDToTokenIDV2(protoSet)
+	require.NoError(t, err)
+	require.Equal(t, datalog.Set{datalog.Integer(-1), datalog.Integer(9), datalog.Integer(10)}, *tokenSet)
+}
+
 func TestBlockConvertV2(t *testing.T) {
 	syms := &datalog.SymbolTable{}
 
