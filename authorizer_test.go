@@ -164,6 +164,45 @@ func TestAuthorizerReuse(t *testing.T) {
 	require.ElementsMatch(t, []string{name("second_run"), name("token_rule")}, rules())
 }
 
+// Query runs on the same content as Authorize: it reads the facts and the
+// rules of the token before Authorize is called, as in biscuit-rust, and
+// the rules of the token apply to a fact that is added after Authorize.
+func TestAuthorizerQueryLoadsToken(t *testing.T) {
+	publicRoot, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
+
+	// resource("file1"); right($f) <- resource($f);
+	builder := NewBuilder(privateRoot)
+	require.NoError(t, builder.AddAuthorityFact(Fact{Predicate{Name: "resource", IDs: []Term{String("file1")}}}))
+	require.NoError(t, builder.AddAuthorityRule(Rule{
+		Head: Predicate{Name: "right", IDs: []Term{Variable("f")}},
+		Body: []Predicate{{Name: "resource", IDs: []Term{Variable("f")}}},
+	}))
+	token, err := builder.Build()
+	require.NoError(t, err)
+
+	rights := func(a Authorizer) []Term {
+		facts, err := a.Query(Rule{
+			Head: Predicate{Name: "query", IDs: []Term{Variable("f")}},
+			Body: []Predicate{{Name: "right", IDs: []Term{Variable("f")}}},
+		})
+		require.NoError(t, err)
+		var res []Term
+		for _, f := range facts {
+			res = append(res, f.IDs...)
+		}
+		return res
+	}
+
+	a, err := token.AuthorizerFrom(RootKey(publicRoot))
+	require.NoError(t, err)
+	require.ElementsMatch(t, []Term{String("file1")}, rights(a))
+
+	a.AddPolicy(DefaultAllowPolicy)
+	require.NoError(t, a.Authorize())
+	a.AddFact(Fact{Predicate{Name: "resource", IDs: []Term{String("file2")}}})
+	require.ElementsMatch(t, []Term{String("file1"), String("file2")}, rights(a))
+}
+
 func TestVerifierPolicies(t *testing.T) {
 	rng := rand.Reader
 	publicRoot, privateRoot, _ := ed25519.GenerateKey(rng)

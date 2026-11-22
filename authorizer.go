@@ -206,17 +206,51 @@ func (v *authorizer) AddRule(rule Rule) {
 	v.rules = append(v.rules, rule.convert(v.symbols))
 }
 
-// loadRules puts the rules of the authorizer in the world, in place of the
-// rules of an earlier run: a run starts from the facts the world has and
-// from the rules of the authorizer, and Authorize adds the rules of the
-// token. The origins a rule trusts depend on the scopes of the authorizer,
-// which may be added after the rule: they are resolved here, not in AddRule.
-func (v *authorizer) loadRules() {
+// load puts in the world the rules of the authorizer, and the facts and the
+// rules of the token, in place of the rules of an earlier run. It returns
+// the origins that each block trusts. Authorize and Query run on the same
+// content: the rules of the token apply to a fact that is added between two
+// runs, and Query reads the token also before Authorize.
+//
+// The origins a rule of the authorizer trusts depend on the scopes of the
+// authorizer, which may be added after the rule: they are resolved here,
+// not in AddRule.
+func (v *authorizer) load() ([]datalog.TrustedOrigins, error) {
 	v.world.ResetRules()
 	defaults := v.authorizerTrustedOrigins()
 	for _, r := range v.rules {
 		v.world.AddRule(datalog.AuthorizerBlockID, v.trustedOrigins(r.Scopes, defaults, datalog.AuthorizerBlockID), r)
 	}
+
+	blocks := append([]*Block{v.biscuit.authority}, v.biscuit.blocks...)
+	blockTrusted := make([]datalog.TrustedOrigins, len(blocks))
+	for i, block := range blocks {
+		blockID := datalog.BlockID(i)
+		blockTrusted[i] = v.trustedOrigins(block.scopes, datalog.DefaultTrustedOrigins(), blockID)
+		symbols := block.symbolTable(v.biscuit.symbols)
+		for _, fact := range *block.facts {
+			f, err := fromDatalogFact(symbols, fact)
+			if err != nil {
+				return nil, fmt.Errorf("biscuit: verification failed: %s", err)
+			}
+			v.world.AddFact(datalog.NewOrigin(blockID), f.convert(v.symbols))
+		}
+
+		for _, rule := range block.rules {
+			// As biscuit-rust does, also when the rule matches nothing.
+			if err := rule.Validate(); err != nil {
+				debug := datalog.SymbolDebugger{SymbolTable: symbols}
+				return nil, fmt.Errorf("%w: block %d: %s", ErrInvalidBlockRule, i, debug.Rule(rule))
+			}
+			r, err := fromDatalogRule(symbols, rule)
+			if err != nil {
+				return nil, fmt.Errorf("biscuit: verification failed: %s", err)
+			}
+			dlRule := r.convert(v.symbols)
+			v.world.AddRule(blockID, v.trustedOrigins(dlRule.Scopes, blockTrusted[i], blockID), dlRule)
+		}
+	}
+	return blockTrusted, nil
 }
 
 func (v *authorizer) AddScope(scope Scope) {
@@ -260,39 +294,9 @@ func runError(err error) error {
 }
 
 func (v *authorizer) Authorize() error {
-	// if we load facts from the verifier before
-	// the token's fact and rules, we might get inconsistent symbols
-	// token ements should first be converted to builder elements
-	// with the token's symbol table, then converted back
-	// with the verifier's symbol table
-	v.loadRules()
-	blocks := append([]*Block{v.biscuit.authority}, v.biscuit.blocks...)
-	blockTrusted := make([]datalog.TrustedOrigins, len(blocks))
-	for i, block := range blocks {
-		blockID := datalog.BlockID(i)
-		blockTrusted[i] = v.trustedOrigins(block.scopes, datalog.DefaultTrustedOrigins(), blockID)
-		symbols := block.symbolTable(v.biscuit.symbols)
-		for _, fact := range *block.facts {
-			f, err := fromDatalogFact(symbols, fact)
-			if err != nil {
-				return fmt.Errorf("biscuit: verification failed: %s", err)
-			}
-			v.world.AddFact(datalog.NewOrigin(blockID), f.convert(v.symbols))
-		}
-
-		for _, rule := range block.rules {
-			// As biscuit-rust does, also when the rule matches nothing.
-			if err := rule.Validate(); err != nil {
-				debug := datalog.SymbolDebugger{SymbolTable: symbols}
-				return fmt.Errorf("%w: block %d: %s", ErrInvalidBlockRule, i, debug.Rule(rule))
-			}
-			r, err := fromDatalogRule(symbols, rule)
-			if err != nil {
-				return fmt.Errorf("biscuit: verification failed: %s", err)
-			}
-			dlRule := r.convert(v.symbols)
-			v.world.AddRule(blockID, v.trustedOrigins(dlRule.Scopes, blockTrusted[i], blockID), dlRule)
-		}
+	blockTrusted, err := v.load()
+	if err != nil {
+		return err
 	}
 
 	if err := v.world.Run(v.symbols); err != nil {
@@ -436,7 +440,9 @@ func (v *authorizer) checkPasses(c datalog.Check, blockID datalog.BlockID, defau
 }
 
 func (v *authorizer) Query(rule Rule) (FactSet, error) {
-	v.loadRules()
+	if _, err := v.load(); err != nil {
+		return nil, err
+	}
 	if err := v.world.Run(v.symbols); err != nil {
 		return nil, runError(err)
 	}
