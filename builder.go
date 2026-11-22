@@ -118,6 +118,9 @@ func (b *builderOptions) AddBlock(block ParsedBlock) error {
 			return err
 		}
 	}
+	for _, s := range block.Scopes {
+		b.AddAuthorityScope(s)
+	}
 
 	return nil
 }

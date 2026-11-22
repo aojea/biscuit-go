@@ -75,6 +75,36 @@ func TestScopesRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// The scopes of a parsed block go to the block it is added to, for the
+// authority block as for the others.
+func TestAddBlockKeepsScopes(t *testing.T) {
+	_, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	trust, err := TrustingPublicKey(pub)
+	require.NoError(t, err)
+	parsed := ParsedBlock{
+		Facts:  []Fact{{Predicate{Name: "right", IDs: []Term{String("read")}}}},
+		Scopes: []Scope{trust},
+	}
+
+	builder := NewBuilder(privateRoot)
+	require.NoError(t, builder.AddBlock(parsed))
+	token, err := builder.Build()
+	require.NoError(t, err)
+	require.Equal(t, []Scope{trust}, token.authority.scopes)
+	require.EqualValues(t, 4, token.authority.version)
+
+	block := token.CreateBlock()
+	require.NoError(t, block.AddBlock(ParsedBlock{Scopes: []Scope{{Kind: ScopePrevious}}}))
+	token, err = token.Append(rand.Reader, block.Build())
+	require.NoError(t, err)
+
+	deser, err := Unmarshal(mustSerialize(t, token))
+	require.NoError(t, err)
+	require.Equal(t, []Scope{trust}, deser.authority.scopes)
+	require.Equal(t, []Scope{{Kind: ScopePrevious}}, deser.blocks[0].scopes)
+}
+
 // A block declares only the keys the token does not have yet. Skipping a
 // repeated key would number the keys after it differently from the other
 // implementations, so the block is refused instead.
