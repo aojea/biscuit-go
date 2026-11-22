@@ -34,7 +34,8 @@ type Biscuit struct {
 
 var (
 	// ErrSymbolTableOverlap is returned when a block declares a symbol that
-	// is not new: a default symbol or a symbol of a block before it.
+	// is not new: a default symbol, a symbol of a block before it, or one
+	// that it declares two times.
 	ErrSymbolTableOverlap = errors.New("biscuit: symbol table overlap")
 	// ErrPublicKeyTableOverlap is returned when a block declares a public key twice, or one the token already has
 	ErrPublicKeyTableOverlap = errors.New("biscuit: public key table overlap")

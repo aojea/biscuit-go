@@ -367,6 +367,20 @@ func TestUnmarshalRejectsSymbolTableOverlap(t *testing.T) {
 			overlap: "read",
 		},
 		{
+			// biscuit-rust accepts this block and gives the symbol two
+			// indexes. Its builders never write one.
+			desc:    "symbol declared two times",
+			block:   func(c *pb.Biscuit) *pb.SignedBlock { return c.Blocks[0] },
+			symbols: []string{"other", "other"},
+			overlap: "other",
+		},
+		{
+			desc:    "symbol declared two times in a third-party block",
+			block:   func(c *pb.Biscuit) *pb.SignedBlock { return c.Blocks[1] },
+			symbols: []string{"staff", "staff"},
+			overlap: "staff",
+		},
+		{
 			desc:    "default symbol in a third-party block",
 			block:   func(c *pb.Biscuit) *pb.SignedBlock { return c.Blocks[1] },
 			symbols: []string{"group", "staff"},
@@ -382,14 +396,6 @@ func TestUnmarshalRejectsSymbolTableOverlap(t *testing.T) {
 			require.ErrorContains(t, err, tc.overlap)
 		})
 	}
-
-	// A symbol that one block declares twice gets two indexes, as in
-	// biscuit-rust: the symbols after it keep the index the block refers to.
-	twice, err := unmarshal(func(c *pb.Biscuit) {
-		editSignedBlock(t, c.Blocks[0], func(b *pb.Block) { b.Symbols = []string{"other", "other"} })
-	})
-	require.NoError(t, err)
-	require.Contains(t, twice.Code()[0], `resource("other", "other")`)
 
 	// A third-party block has its own table: it may declare a symbol of the token.
 	_, err = unmarshal(func(c *pb.Biscuit) {

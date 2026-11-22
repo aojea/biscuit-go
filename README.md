@@ -38,8 +38,8 @@ tokens and the same authorizers. The known differences are:
   version `3`. The two are read.
 - These tokens are refused here and accepted by biscuit-rust: a protobuf message with a required
   field that is missing, a version `3` block that uses datalog `v3.3` features, a P-256 key that is
-  not compressed and that verifies a signature, and a key with an algorithm that the schema does
-  not define.
+  not compressed and that verifies a signature, a key with an algorithm that the schema does not
+  define, and a block that declares one symbol two times.
 - A rule that the authorizer itself adds, whose head has a variable that its body does not bind, is
   an error. In biscuit-rust it makes no fact.
 - A rule and a query read the facts in the order in which they were added, and biscuit-rust reads
