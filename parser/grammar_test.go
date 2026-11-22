@@ -44,7 +44,7 @@ func TestGrammarPredicate(t *testing.T) {
 				Name: sptr("resource"),
 				IDs: []*Term{
 					{Variable: varptr("0")},
-					{String: sptr("read")},
+					{String: strptr("read")},
 				},
 			},
 		},
@@ -53,8 +53,8 @@ func TestGrammarPredicate(t *testing.T) {
 			Expected: &Predicate{
 				Name: sptr("right"),
 				IDs: []*Term{
-					{String: sptr("/a/file1.txt")},
-					{String: sptr("read")},
+					{String: strptr("/a/file1.txt")},
+					{String: strptr("read")},
 				},
 			},
 		},
@@ -63,8 +63,8 @@ func TestGrammarPredicate(t *testing.T) {
 			Expected: &Predicate{
 				Name: sptr("right"),
 				IDs: []*Term{
-					{String: sptr("/a/file1.txt")},
-					{String: sptr("read")},
+					{String: strptr("/a/file1.txt")},
+					{String: strptr("read")},
 				},
 			},
 		},
@@ -73,7 +73,7 @@ func TestGrammarPredicate(t *testing.T) {
 			Expected: &Predicate{
 				Name: sptr("right"),
 				IDs: []*Term{
-					{String: sptr("/a/file1.txt")},
+					{String: strptr("/a/file1.txt")},
 					{Variable: varptr("1")},
 				},
 			},
@@ -94,7 +94,7 @@ func TestGrammarPredicate(t *testing.T) {
 				Name: sptr("right"),
 				IDs: []*Term{
 					{Variable: varptr("1")},
-					{Braces: &Braces{Entries: []*BraceEntry{{Key: &Term{Bytes: hexsptr("41414141")}}, {Key: &Term{String: sptr("sym")}}}}},
+					{Braces: &Braces{Entries: []*BraceEntry{{Key: &Term{Bytes: hexsptr("41414141")}}, {Key: &Term{String: strptr("sym")}}}}},
 				},
 			},
 		},
@@ -104,7 +104,7 @@ func TestGrammarPredicate(t *testing.T) {
 				Name: sptr("right"),
 				IDs: []*Term{
 					{Variable: varptr("1")},
-					{Array: []*Term{{Bytes: hexsptr("41414141")}, {String: sptr("sym")}}},
+					{Array: []*Term{{Bytes: hexsptr("41414141")}, {String: strptr("sym")}}},
 				},
 			},
 		},
@@ -407,8 +407,8 @@ func TestGrammarCheck(t *testing.T) {
 
 									Name: sptr("parent"),
 									IDs: []*Term{
-										{String: sptr("a")},
-										{String: sptr("b")},
+										{String: strptr("a")},
+										{String: strptr("b")},
 									},
 								},
 							},
@@ -417,8 +417,8 @@ func TestGrammarCheck(t *testing.T) {
 
 									Name: sptr("parent"),
 									IDs: []*Term{
-										{String: sptr("b")},
-										{String: sptr("c")},
+										{String: strptr("b")},
+										{String: strptr("c")},
 									},
 								},
 							},
@@ -437,8 +437,8 @@ func TestGrammarCheck(t *testing.T) {
 								Predicate: &Predicate{
 									Name: sptr("parent"),
 									IDs: []*Term{
-										{String: sptr("a")},
-										{String: sptr("b")},
+										{String: strptr("a")},
+										{String: strptr("b")},
 									},
 								},
 							},
@@ -446,8 +446,8 @@ func TestGrammarCheck(t *testing.T) {
 								Predicate: &Predicate{
 									Name: sptr("parent"),
 									IDs: []*Term{
-										{String: sptr("b")},
-										{String: sptr("c")},
+										{String: strptr("b")},
+										{String: strptr("c")},
 									},
 								},
 							},
@@ -466,8 +466,8 @@ func TestGrammarCheck(t *testing.T) {
 								Predicate: &Predicate{
 									Name: sptr("parent"),
 									IDs: []*Term{
-										{String: sptr("a")},
-										{String: sptr("b")},
+										{String: strptr("a")},
+										{String: strptr("b")},
 									},
 								},
 							},
@@ -475,8 +475,8 @@ func TestGrammarCheck(t *testing.T) {
 								Predicate: &Predicate{
 									Name: sptr("parent"),
 									IDs: []*Term{
-										{String: sptr("b")},
-										{String: sptr("c")},
+										{String: strptr("b")},
+										{String: strptr("c")},
 									},
 								},
 							},
@@ -488,8 +488,8 @@ func TestGrammarCheck(t *testing.T) {
 								Predicate: &Predicate{
 									Name: sptr("parent"),
 									IDs: []*Term{
-										{String: sptr("a")},
-										{String: sptr("b")},
+										{String: strptr("a")},
+										{String: strptr("b")},
 									},
 								},
 							},
@@ -497,8 +497,8 @@ func TestGrammarCheck(t *testing.T) {
 								Predicate: &Predicate{
 									Name: sptr("parent"),
 									IDs: []*Term{
-										{String: sptr("b")},
-										{String: sptr("c")},
+										{String: strptr("b")},
+										{String: strptr("c")},
 									},
 								},
 							},
@@ -564,7 +564,7 @@ func TestGrammarCheck(t *testing.T) {
 																							Expr6: &Expr6{
 																								Left: &ExprTerm{
 																									Term: &Term{
-																										String: sptr("test"),
+																										String: strptr("test"),
 																									},
 																								},
 																							},
@@ -786,6 +786,11 @@ func paramptr(s string) *Parameter {
 
 func sptr(s string) *string {
 	return &s
+}
+
+func strptr(s string) *StringLiteral {
+	q := StringLiteral(s)
+	return &q
 }
 
 func i64ptr(i int64) *Integer {

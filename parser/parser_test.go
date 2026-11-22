@@ -626,6 +626,92 @@ func TestParseRuleUnboundVariable(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// A string has the escapes of biscuit-rust: \" \\ and \n. All other
+// characters stand for themselves, a new line also, and no other escape is
+// valid.
+func TestParseStringEscapes(t *testing.T) {
+	p := New()
+	for input, want := range map[string]string{
+		`""`:               ``,
+		`"abc"`:            `abc`,
+		`"a\"b"`:           `a"b`,
+		`"é\""`:            `é"`,
+		`"a\\b"`:           `a\b`,
+		`"a\\"`:            `a\`,
+		`"\\\""`:           `\"`,
+		`"a\nb"`:           "a\nb",
+		"\"a\nb\tc\"":      "a\nb\tc",
+		`"http://x//y"`:    `http://x//y`,
+		`"^\\d+\\.\\w+$"`:  `^\d+\.\w+$`,
+		`"a;b) <- c // d"`: `a;b) <- c // d`,
+	} {
+		fact, err := p.Fact(`f(`+input+`)`, nil)
+		require.NoError(t, err, input)
+		require.Equal(t, []biscuit.Term{biscuit.String(want)}, fact.IDs, input)
+	}
+
+	// Two strings, and not one that has a quote in the middle.
+	fact, err := p.Fact(`f("a\"", "b")`, nil)
+	require.NoError(t, err)
+	require.Equal(t, []biscuit.Term{biscuit.String(`a"`), biscuit.String("b")}, fact.IDs)
+
+	// The error names the escape at each place where a string can be.
+	for _, input := range []string{`"a\tb"`, `"\w+"`, `"\u00e9"`, `"\x41"`, `"\r"`, `"\0"`, `"\'"`} {
+		_, err := p.Fact(`f(`+input+`)`, nil)
+		require.ErrorContains(t, err, "invalid escape in the string "+input, input)
+		_, err = p.Check(`check if f($s), $s.matches(`+input+`)`, nil)
+		require.ErrorContains(t, err, "invalid escape in the string "+input, input)
+		_, err = p.Block(`f(1); g({"a": [`+input+`]});`, nil)
+		require.ErrorContains(t, err, "invalid escape in the string "+input, input)
+	}
+	for _, input := range []string{"\"a\\\nb\"", `"abc\"`, `"abc`} {
+		_, err := p.Fact(`f(`+input+`)`, nil)
+		require.Error(t, err, input)
+	}
+}
+
+// The content of a string is not syntax. A string that reads as a token of
+// the language stays a string: "hex:00" is not bytes and {","} is not the
+// empty set. A string cannot stand for a separator, an operator or a name.
+func TestParseStringIsNotSyntax(t *testing.T) {
+	p := New()
+	for _, s := range []string{
+		`hex:00`, `hex:zz`, `,`, `}`, `{`, `[`, `null`, `true`, `-`, `!`, `(`, `)`, `;`, `:`, `or`,
+		`trusting`, `check if`, `==`, `<-`, `$x`, `// c`, `1`, `2020-01-01T00:00:00Z`, `ed25519/00`,
+	} {
+		str := biscuit.String(s)
+
+		fact, err := p.Fact(`f("`+s+`")`, nil)
+		require.NoError(t, err, s)
+		require.Equal(t, []biscuit.Term{str}, fact.IDs, s)
+
+		fact, err = p.Fact(`f({"`+s+`"}, ["`+s+`"], {"`+s+`": "`+s+`"})`, nil)
+		require.NoError(t, err, s)
+		require.Equal(t, []biscuit.Term{
+			biscuit.Set{str}, biscuit.Array{str}, biscuit.Map{{Key: str, Value: str}},
+		}, fact.IDs, s)
+
+		check, err := p.Check(`check if "`+s+`" == "`+s+`"`, nil)
+		require.NoError(t, err, s)
+		expression := check.Queries[0].Expressions[0]
+		require.Len(t, expression, 3, s)
+		require.Equal(t, biscuit.Value{Term: str}, expression[0], s)
+		require.Equal(t, biscuit.Value{Term: str}, expression[1], s)
+	}
+
+	for _, input := range []string{
+		`check if f("a" "," "b")`,
+		`check if 1 "==" 1`,
+		`check if f(1) "or" g(1)`,
+		`check if "a"."length"() == 1`,
+		`check if f("(" 1 ")")`,
+		`check if "!" true`,
+	} {
+		_, err := p.Check(input, nil)
+		require.Error(t, err, input)
+	}
+}
+
 func TestParserCheck(t *testing.T) {
 	p := New()
 	for _, testCase := range getCheckTestCases() {

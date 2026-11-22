@@ -35,7 +35,10 @@ var BiscuitLexerRules = []lexer.SimpleRule{
 	{Name: "And", Pattern: `&&`},
 	{Name: "Operator", Pattern: `===|==|!==|!=|>=|<=|>|<|\+|-|\*`},
 	{Name: "Comment", Pattern: `//[^\n]*`},
-	{Name: "String", Pattern: `\"[^\"]*\"`},
+	// A string has three escapes. A string with another escape is a token
+	// of its own, which the parser refuses with a message about the escape.
+	{Name: "String", Pattern: `"(\\["\\n]|[^"\\])*"`},
+	{Name: "InvalidString", Pattern: `"(\\.|[^"\\])*"`},
 	{Name: "Variable", Pattern: `\$[a-zA-Z0-9_:]+`},
 	{Name: "DateTime", Pattern: `\d\d\d\d-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?(Z|([-+]\d\d:\d\d))?`},
 	{Name: "Int", Pattern: `[0-9]+`},
@@ -52,7 +55,18 @@ var DefaultParserOptions = []participle.Option{
 	// variable; the second token decides.
 	participle.UseLookahead(2),
 	participle.Elide("Whitespace", "EOL"),
-	participle.Unquote("String"),
+	// A String token keeps its quotes, and StringLiteral removes them. The
+	// grammar compares the text of a token with its literals: without the
+	// quotes, the string "," would be a comma and "hex:00" would be bytes.
+	participle.Map(refuseInvalidString, "InvalidString"),
+}
+
+// refuseInvalidString reports a string with an escape that is not valid.
+// The error comes from the lexer, and not from the capture of the string:
+// the parser would take that one as an alternative that does not match, and
+// would report the token that it expected in place of the string.
+func refuseInvalidString(token lexer.Token) (lexer.Token, error) {
+	return token, participle.Errorf(token.Pos, `invalid escape in the string %s: only \", \\ and \n are valid`, token.Value)
 }
 
 type Parser interface {

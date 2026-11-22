@@ -45,6 +45,25 @@ func (v *Variable) Capture(values []string) error {
 
 type Parameter string
 
+// StringLiteral is the value of a string literal: the text between the
+// quotes, with the escapes applied. They are those of biscuit-rust: \" for
+// a quote, \\ for a backslash and \n for a new line. All other characters
+// stand for themselves, and no other escape is valid.
+type StringLiteral string
+
+// Capture reads a String token, which has its quotes. The lexer gives only
+// the strings with valid escapes: a backslash that is before another
+// character is kept as it is.
+func (s *StringLiteral) Capture(values []string) error {
+	if len(values) != 1 || len(values[0]) < 2 {
+		return errors.New("parser: invalid string values")
+	}
+	*s = StringLiteral(stringUnescaper.Replace(values[0][1 : len(values[0])-1]))
+	return nil
+}
+
+var stringUnescaper = strings.NewReplacer(`\\`, `\`, `\"`, `"`, `\n`, "\n")
+
 // Integer is an int64 literal with an optional leading minus sign. The sign
 // is a separate token, so "1 -2" is still a subtraction, and the full text
 // is parsed so that the smallest int64 is accepted.
@@ -291,17 +310,17 @@ type Deny struct {
 // Braces hold a parameter {name}, the empty set {,}, the empty map {}, a set
 // {a, b} or a map {k: v}; brackets hold an array [a, b].
 type Term struct {
-	Parameter  *Parameter `"{" @Ident "}"`
-	Variable   *Variable  `| @Variable`
-	Bytes      *HexString `| @@`
-	String     *string    `| @String`
-	Date       *string    `| @DateTime`
-	Integer    *Integer   `| @("-"? Int)`
-	Bool       *Bool      `| @Bool`
-	Null       bool       `| @"null"`
-	Braces     *Braces    `| @@`
-	EmptyArray bool       `| @("[" "]")`
-	Array      []*Term    `| "[" @@ ("," @@)* "]"`
+	Parameter  *Parameter     `"{" @Ident "}"`
+	Variable   *Variable      `| @Variable`
+	Bytes      *HexString     `| @@`
+	String     *StringLiteral `| @String`
+	Date       *string        `| @DateTime`
+	Integer    *Integer       `| @("-"? Int)`
+	Bool       *Bool          `| @Bool`
+	Null       bool           `| @"null"`
+	Braces     *Braces        `| @@`
+	EmptyArray bool           `| @("[" "]")`
+	Array      []*Term        `| "[" @@ ("," @@)* "]"`
 }
 
 // Braces is a set or a map: entries with a value make a map, entries
