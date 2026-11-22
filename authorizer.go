@@ -212,6 +212,21 @@ func (v *authorizer) AddPolicy(policy Policy) {
 // authorizerOrigin is the origin of the facts the authorizer adds itself.
 var authorizerOrigin = datalog.NewOrigin(datalog.AuthorizerBlockID)
 
+// runError wraps an error of the expressions of a rule in ErrExecution, as
+// for the expressions of a check or a policy. The run limits and a rule that
+// is not valid are not errors of an expression.
+func runError(err error) error {
+	var invalidRule datalog.InvalidRuleError
+	switch {
+	case errors.Is(err, datalog.ErrWorldRunLimitMaxFacts),
+		errors.Is(err, datalog.ErrWorldRunLimitMaxIterations),
+		errors.Is(err, datalog.ErrWorldRunLimitTimeout),
+		errors.As(err, &invalidRule):
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrExecution, err)
+}
+
 func (v *authorizer) Authorize() error {
 	// if we load facts from the verifier before
 	// the token's fact and rules, we might get inconsistent symbols
@@ -244,7 +259,7 @@ func (v *authorizer) Authorize() error {
 	}
 
 	if err := v.world.Run(v.symbols); err != nil {
-		return err
+		return runError(err)
 	}
 	v.dirty = true
 
@@ -382,7 +397,7 @@ func (v *authorizer) checkPasses(c datalog.Check, blockID datalog.BlockID, defau
 func (v *authorizer) Query(rule Rule) (FactSet, error) {
 	v.loadRules()
 	if err := v.world.Run(v.symbols); err != nil {
-		return nil, err
+		return nil, runError(err)
 	}
 	v.dirty = true
 

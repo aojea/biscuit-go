@@ -366,6 +366,26 @@ func TestAuthorizeExecutionError(t *testing.T) {
 	require.NoError(t, err)
 	ab.AddPolicy(Policy{Kind: PolicyKindAllow, Queries: overflow.Queries})
 	require.ErrorIs(t, ab.Authorize(), ErrExecution)
+
+	// The same from a rule, in Authorize and in Query.
+	rule := Rule{
+		Head:        Predicate{Name: "derived", IDs: []Term{Variable("x")}},
+		Body:        []Predicate{{Name: "value", IDs: []Term{Variable("x")}}},
+		Expressions: []Expression{{Value{Variable("x")}, Value{Integer(9223372036854775807)}, BinaryAdd, Value{Integer(0)}, BinaryGreaterThan}},
+	}
+	for _, run := range []func(Authorizer) error{
+		func(a Authorizer) error { return a.Authorize() },
+		func(a Authorizer) error { _, err := a.Query(rule); return err },
+	} {
+		ab, err = plain.AuthorizerFrom(RootKey(publicRoot))
+		require.NoError(t, err)
+		ab.AddFact(Fact{Predicate{Name: "value", IDs: []Term{Integer(1)}}})
+		ab.AddRule(rule)
+		ab.AddPolicy(DefaultAllowPolicy)
+		err = run(ab)
+		require.ErrorIs(t, err, ErrExecution)
+		require.ErrorIs(t, err, datalog.ErrInt64Overflow)
+	}
 }
 
 // reject if passes when its query has no match; a block with one is v6.
