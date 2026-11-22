@@ -41,7 +41,9 @@ func PublicKeyFrom(key stdcrypto.PublicKey) (PublicKey, error) {
 }
 
 // ParsePublicKey reads a key in the datalog syntax, algorithm/hex, where
-// algorithm is ed25519 or secp256r1.
+// algorithm is ed25519 or secp256r1. The bytes are not checked to be a key
+// of the algorithm: as in biscuit-rust, a scope holds its key as data, and a
+// key that is not valid is the key of no block.
 func ParsePublicKey(s string) (PublicKey, error) {
 	algorithm, encoded, ok := strings.Cut(s, "/")
 	if !ok {
@@ -58,9 +60,6 @@ func ParsePublicKey(s string) (PublicKey, error) {
 	}
 	key, err := hex.DecodeString(encoded)
 	if err != nil {
-		return PublicKey{}, fmt.Errorf("biscuit: invalid public key %q: %w", s, err)
-	}
-	if _, err := crypto.ParseVerifier(alg, key); err != nil {
 		return PublicKey{}, fmt.Errorf("biscuit: invalid public key %q: %w", s, err)
 	}
 	return PublicKey{Algorithm: datalog.Algorithm(alg), Key: key}, nil
@@ -239,10 +238,28 @@ func tokenPublicKeyToProtoPublicKey(key datalog.PublicKey) *pb.PublicKey {
 	}
 }
 
+// protoPublicKeyToTokenPublicKey reads a key that verifies a signature: the
+// key of a third party. Its encoding is checked.
 func protoPublicKeyToTokenPublicKey(key *pb.PublicKey) (datalog.PublicKey, error) {
-	// ParseVerifier validates the encoding for the algorithm.
 	if _, err := crypto.ParseVerifier(key.GetAlgorithm(), key.GetKey()); err != nil {
 		return datalog.PublicKey{}, err
 	}
-	return datalog.PublicKey{Algorithm: datalog.Algorithm(key.GetAlgorithm()), Key: key.GetKey()}, nil
+	return protoScopeKeyToTokenPublicKey(key)
+}
+
+// protoScopeKeyToTokenPublicKey reads a key of the key table of a block. A
+// scope holds a key as data, as in biscuit-rust: it is compared with the
+// keys that signed the third-party blocks, whose encoding is checked. A key
+// that is not valid is the key of no block.
+//
+// The algorithm must be one that the schema defines. biscuit-rust reads a
+// number that is not defined as Ed25519: the key is then equal to the
+// Ed25519 key that has the same bytes. Such a key is refused here.
+func protoScopeKeyToTokenPublicKey(key *pb.PublicKey) (datalog.PublicKey, error) {
+	switch key.GetAlgorithm() {
+	case pb.PublicKey_Ed25519, pb.PublicKey_SECP256R1:
+		return datalog.PublicKey{Algorithm: datalog.Algorithm(key.GetAlgorithm()), Key: key.GetKey()}, nil
+	default:
+		return datalog.PublicKey{}, fmt.Errorf("%w: %d", crypto.ErrUnsupportedAlgorithm, key.GetAlgorithm())
+	}
 }

@@ -764,8 +764,12 @@ func TestParseScopes(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "previous", fact.Name)
 
-	_, err = p.Rule(`r($a) <- f($a) trusting ed25519/abcd`, nil)
-	require.ErrorContains(t, err, "invalid public key")
+	// The key of a scope is data, as in biscuit-rust: any hexadecimal bytes.
+	rule, err = p.Rule(`r($a) <- f($a) trusting ed25519/abcd`, nil)
+	require.NoError(t, err)
+	require.Equal(t, []byte{0xab, 0xcd}, rule.Scopes[0].PublicKey.Key)
+	_, err = p.Rule(`r($a) <- f($a) trusting ed25519/xyz`, nil)
+	require.Error(t, err)
 	_, err = p.Rule(`r($a) <- f($a) trusting rsa/abcd`, nil)
 	require.Error(t, err)
 }

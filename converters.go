@@ -80,7 +80,7 @@ func protoBlockToTokenBlock(input *pb.Block, keys publicKeyTable) (*Block, error
 
 	var publicKeys []datalog.PublicKey
 	for _, pbKey := range input.PublicKeys {
-		key, err := protoPublicKeyToTokenPublicKey(pbKey)
+		key, err := protoScopeKeyToTokenPublicKey(pbKey)
 		if err != nil {
 			return nil, fmt.Errorf("biscuit: failed to convert proto block to token block: %w", err)
 		}

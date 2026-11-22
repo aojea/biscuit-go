@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/eclipse-biscuit/biscuit-go/v2/datalog"
+	"github.com/eclipse-biscuit/biscuit-go/v2/internal/crypto"
 	"github.com/eclipse-biscuit/biscuit-go/v2/pb"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
@@ -22,10 +23,47 @@ func TestPublicKeyParse(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, key, parsed)
 
-	_, err = ParsePublicKey("ed25519/abcd")
+	// A scope holds its key as data, as in biscuit-rust: the bytes do not
+	// have to be a key of the algorithm.
+	short, err := ParsePublicKey("ed25519/abcd")
+	require.NoError(t, err)
+	require.Equal(t, PublicKey{Algorithm: datalog.AlgorithmEd25519, Key: []byte{0xab, 0xcd}}, short)
+	_, err = ParsePublicKey("ed25519/xyz")
 	require.ErrorContains(t, err, "invalid public key")
 	_, err = ParsePublicKey("nokey")
 	require.ErrorContains(t, err, "expected algorithm/hex")
+}
+
+// A block of biscuit-rust can carry a scope key that is not a key of its
+// algorithm: the block is read, and the key is the key of no block.
+func TestScopeKeyIsData(t *testing.T) {
+	_, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
+	key, err := ParsePublicKey("secp256r1/0102")
+	require.NoError(t, err)
+
+	builder := NewBuilder(privateRoot)
+	require.NoError(t, builder.AddAuthorityCheck(Check{Queries: []Rule{{
+		Head:   Predicate{Name: "query"},
+		Body:   []Predicate{{Name: "group", IDs: []Term{String("admin")}}},
+		Scopes: []Scope{{Kind: ScopePublicKey, PublicKey: key}},
+	}}}))
+	token, err := builder.Build()
+	require.NoError(t, err)
+
+	deser, err := Unmarshal(mustSerialize(t, token))
+	require.NoError(t, err)
+	require.Equal(t, publicKeyTable{key}, deser.publicKeys)
+	require.Contains(t, deser.String(), "trusting secp256r1/0102")
+
+	// An algorithm that the schema does not define is not data: biscuit-rust
+	// reads it as Ed25519, and the key would be equal to another key.
+	for _, algorithm := range []pb.PublicKey_Algorithm{2, 100, -1} {
+		_, err = protoBlockToTokenBlock(&pb.Block{
+			Version:    proto.Uint32(4),
+			PublicKeys: []*pb.PublicKey{{Algorithm: algorithm.Enum(), Key: []byte{1, 2}}},
+		}, nil)
+		require.ErrorIs(t, err, crypto.ErrUnsupportedAlgorithm, "algorithm %d", algorithm)
+	}
 }
 
 // Scopes round-trip through the token: keys are interned once per token and
