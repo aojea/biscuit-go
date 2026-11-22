@@ -650,20 +650,15 @@ var ErrFactNotFound = errors.New("biscuit: fact not found")
 // starting from the authority block and then each block in the order they were added.
 // ErrFactNotFound is returned when no block contains the fact.
 func (b *Biscuit) GetBlockID(fact Fact) (int, error) {
-	// don't store symbols from searched fact in the verifier table
-	symbols := b.symbols.Clone()
-	datalogFact := fact.Predicate.convert(symbols)
-
-	for _, f := range *b.authority.facts {
-		if f.Equal(datalogFact) {
-			return 0, nil
-		}
-	}
-
-	for i, b := range b.blocks {
-		for _, f := range *b.facts {
+	blocks := append([]*Block{b.authority}, b.blocks...)
+	for i, block := range blocks {
+		// A third-party block has its own symbol table. The symbols of the
+		// searched fact are added to a copy, not to the table of the token.
+		symbols := block.symbolTable(b.symbols).Clone()
+		datalogFact := fact.Predicate.convert(symbols)
+		for _, f := range *block.facts {
 			if f.Equal(datalogFact) {
-				return i + 1, nil
+				return i, nil
 			}
 		}
 	}

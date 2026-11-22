@@ -788,6 +788,35 @@ func TestGetBlockID(t *testing.T) {
 	require.Equal(t, ErrFactNotFound, err)
 }
 
+// A third-party block has its own symbol table: the same index is another
+// string than in the table of the token.
+func TestGetBlockIDThirdParty(t *testing.T) {
+	_, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
+	thirdPartyPublic, thirdPartyPrivate, _ := ed25519.GenerateKey(rand.Reader)
+	user := func(name string) Fact {
+		return Fact{Predicate{Name: "user", IDs: []Term{String(name)}}}
+	}
+
+	builder := NewBuilder(privateRoot)
+	require.NoError(t, builder.AddAuthorityFact(Fact{Predicate{Name: "owner", IDs: []Term{String("alice")}}}))
+	token, err := builder.Build()
+	require.NoError(t, err)
+	request, err := token.ThirdPartyRequest()
+	require.NoError(t, err)
+	block := NewThirdPartyBlockBuilder()
+	require.NoError(t, block.AddFact(user("bob")))
+	contents, err := request.CreateBlock(thirdPartyPrivate, block)
+	require.NoError(t, err)
+	token, err = token.AppendThirdPartyBlock(nil, thirdPartyPublic, contents)
+	require.NoError(t, err)
+
+	idx, err := token.GetBlockID(user("bob"))
+	require.NoError(t, err)
+	require.Equal(t, 1, idx)
+	_, err = token.GetBlockID(user("alice"))
+	require.Equal(t, ErrFactNotFound, err)
+}
+
 func TestInvalidRuleGeneration(t *testing.T) {
 	rng := rand.Reader
 	publicRoot, privateRoot, _ := ed25519.GenerateKey(rng)
