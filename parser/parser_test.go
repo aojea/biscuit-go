@@ -734,6 +734,19 @@ func TestParseStringIsNotSyntax(t *testing.T) {
 	}
 }
 
+// A fact in the source of a block or of an authorizer cannot have a
+// variable, as a fact parsed on its own.
+func TestParseBlockFactWithVariable(t *testing.T) {
+	p := New()
+	_, err := p.Block(`right("file1", "read"); right($file, "read");`, nil)
+	require.ErrorIs(t, err, ErrVariableInFact)
+	_, err = p.Authorizer(`resource($file); allow if true;`, nil)
+	require.ErrorIs(t, err, ErrVariableInFact)
+
+	_, err = p.Block(`right("file1", "read"); right($file, "read") <- resource($file);`, nil)
+	require.NoError(t, err)
+}
+
 func TestParserCheck(t *testing.T) {
 	p := New()
 	for _, testCase := range getCheckTestCases() {

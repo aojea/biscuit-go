@@ -176,14 +176,29 @@ func (b *Block) ToBiscuit(parameters ParametersMap) (*biscuit.ParsedBlock, error
 			}
 			rules = append(rules, *r)
 		} else {
-			p, err := e.Predicate.ToBiscuit(parameters)
+			f, err := e.Predicate.toFact(parameters)
 			if err != nil {
 				return nil, err
 			}
-			facts = append(facts, biscuit.Fact{Predicate: *p})
+			facts = append(facts, f)
 		}
 	}
 	return &biscuit.ParsedBlock{Facts: facts, Rules: rules, Checks: checks, Scopes: scopes}, nil
+}
+
+// toFact converts a predicate that stands alone. A fact cannot have a
+// variable.
+func (p *Predicate) toFact(parameters ParametersMap) (biscuit.Fact, error) {
+	pred, err := p.ToBiscuit(parameters)
+	if err != nil {
+		return biscuit.Fact{}, err
+	}
+	for _, id := range pred.IDs {
+		if id.Type() == biscuit.TermTypeVariable {
+			return biscuit.Fact{}, ErrVariableInFact
+		}
+	}
+	return biscuit.Fact{Predicate: *pred}, nil
 }
 
 type Authorizer struct {
@@ -230,11 +245,11 @@ func (b *Authorizer) ToBiscuit(parameters ParametersMap) (*biscuit.ParsedAuthori
 				}
 				rules = append(rules, *r)
 			} else {
-				p, err := be.Predicate.ToBiscuit(parameters)
+				f, err := be.Predicate.toFact(parameters)
 				if err != nil {
 					return nil, err
 				}
-				facts = append(facts, biscuit.Fact{Predicate: *p})
+				facts = append(facts, f)
 			}
 		} else if e.Policy != nil {
 			p, err := e.Policy.ToBiscuit(parameters)

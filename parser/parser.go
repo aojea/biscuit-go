@@ -123,18 +123,7 @@ func (p *parser) Fact(fact string, parameters ParametersMap) (biscuit.Fact, erro
 		return biscuit.Fact{}, err
 	}
 
-	pred, err := parsed.ToBiscuit(parameters)
-	if err != nil {
-		return biscuit.Fact{}, err
-	}
-
-	for _, a := range pred.IDs {
-		if a.Type() == biscuit.TermTypeVariable {
-			return biscuit.Fact{}, ErrVariableInFact
-		}
-	}
-
-	return biscuit.Fact{Predicate: *pred}, nil
+	return parsed.toFact(parameters)
 }
 
 func (p *parser) Rule(rule string, parameters ParametersMap) (biscuit.Rule, error) {
