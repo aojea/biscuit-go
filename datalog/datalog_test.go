@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"errors"
+	"math"
 	"reflect"
 	"slices"
 	"testing"
@@ -452,6 +453,19 @@ func TestSymbolTableInsertAndSym(t *testing.T) {
 	require.Equal(t, String(1026), s.Sym("c"))
 	require.Equal(t, String(1027), s.Sym("d"))
 	require.Equal(t, nil, s.Sym("e"))
+}
+
+// An index that no symbol has is printed as such, also when it does not fit
+// in an int.
+func TestSymbolTableStrOutOfRange(t *testing.T) {
+	s := &SymbolTable{"a"}
+	require.Equal(t, "read", s.Str(0))
+	require.Equal(t, "a", s.Str(1024))
+	require.Equal(t, "a", s.Var(1024))
+	for _, index := range []String{String(len(DEFAULT_SYMBOLS)), 1023, 1025, math.MaxInt64, math.MaxInt64 + 1, math.MaxUint64} {
+		require.Contains(t, s.Str(index), "invalid symbol")
+	}
+	require.Contains(t, s.Var(math.MaxUint32), "invalid variable")
 }
 
 func TestSymbolTableClone(t *testing.T) {

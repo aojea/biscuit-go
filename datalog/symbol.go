@@ -93,31 +93,32 @@ func (t *SymbolTable) Index(s string) uint64 {
 }
 
 func (t *SymbolTable) Str(sym String) string {
-	if int(sym) < 1024 {
-		if int(sym) > len(DEFAULT_SYMBOLS)-1 {
-			return fmt.Sprintf("<invalid symbol %d>", sym)
-		} else {
-			return DEFAULT_SYMBOLS[int(sym)]
-		}
+	if s, ok := t.lookup(uint64(sym)); ok {
+		return s
 	}
-	if int(sym)-1024 > len(*t)-1 {
-		return fmt.Sprintf("<invalid symbol %d>", sym)
-	}
-	return (*t)[int(sym)-1024]
+	return fmt.Sprintf("<invalid symbol %d>", sym)
 }
 
 func (t *SymbolTable) Var(v Variable) string {
-	if int(v) < 1024 {
-		if int(v) > len(DEFAULT_SYMBOLS)-1 {
-			return fmt.Sprintf("<invalid variable %d>", v)
-		} else {
-			return DEFAULT_SYMBOLS[int(v)]
+	if s, ok := t.lookup(uint64(v)); ok {
+		return s
+	}
+	return fmt.Sprintf("<invalid variable %d>", v)
+}
+
+// lookup returns the string of a symbol index: a default symbol below
+// OFFSET, a symbol of the table from OFFSET.
+func (t *SymbolTable) lookup(index uint64) (string, bool) {
+	if index < uint64(OFFSET) {
+		if index < uint64(len(DEFAULT_SYMBOLS)) {
+			return DEFAULT_SYMBOLS[index], true
 		}
+		return "", false
 	}
-	if int(v)-1024 > len(*t)-1 {
-		return fmt.Sprintf("<invalid variable %d>", v)
+	if index -= uint64(OFFSET); index < uint64(len(*t)) {
+		return (*t)[index], true
 	}
-	return (*t)[int(v)-1024]
+	return "", false
 }
 
 // Clone returns a table that does not share memory with the receiver: a
