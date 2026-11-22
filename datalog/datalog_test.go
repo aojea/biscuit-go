@@ -685,23 +685,27 @@ func TestWorldQueryMatchAll(t *testing.T) {
 // A check and a policy need one match: the facts after the first match are
 // not read, so an expression that fails on one of them does not stop the
 // authorization. `check all` stops at the first match that does not hold. A
-// query and a rule read all the facts.
+// query and a rule read all the facts. A check and a policy read the facts
+// in the order of biscuit-rust: by origin, then by their terms.
 func TestWorldQueryStopsAtFirstMatch(t *testing.T) {
 	syms := &SymbolTable{}
 	value := syms.Insert("value")
-	// value($x), 10 / $x > 4: true for 1 and 2, false for 5, an error for 0.
+	// value($k, $x), 10 / $x > 4: true for 1 and 2, false for 5, an error
+	// for 0.
 	rule := Rule{
 		Head: Predicate{syms.Insert("ok"), []Term{Variable(0)}},
-		Body: []Predicate{{value, []Term{Variable(0)}}},
+		Body: []Predicate{{value, []Term{Variable(1), Variable(0)}}},
 		Expressions: []Expression{{
 			Value{Integer(10)}, Value{Variable(0)}, BinaryOp{Div{}},
 			Value{Integer(4)}, BinaryOp{GreaterThan{}},
 		}},
 	}
+	// The values are read in the order given: their position is the first
+	// term of the fact. They are added last first.
 	world := func(values ...Integer) *World {
 		w := NewWorld()
-		for _, v := range values {
-			w.AddFact(testOrigin, Fact{Predicate{value, []Term{v}}})
+		for i := len(values) - 1; i >= 0; i-- {
+			w.AddFact(testOrigin, Fact{Predicate{value, []Term{Integer(i), values[i]}}})
 		}
 		return w
 	}
@@ -714,6 +718,30 @@ func TestWorldQueryStopsAtFirstMatch(t *testing.T) {
 	matched, err = world(5).QueryMatch(rule, testTrusted, syms)
 	require.NoError(t, err)
 	require.False(t, matched)
+
+	// The origin comes before the terms: a fact of the authority block is
+	// read before a fact of the authorizer.
+	origins := NewWorld()
+	origins.AddFact(NewOrigin(AuthorizerBlockID), Fact{Predicate{value, []Term{Integer(0), Integer(0)}}})
+	origins.AddFact(testOrigin, Fact{Predicate{value, []Term{Integer(1), Integer(1)}}})
+	matched, err = origins.QueryMatch(rule, testTrusted, syms)
+	require.NoError(t, err)
+	require.True(t, matched)
+
+	// The facts are sorted one time for the checks that read them. A fact
+	// that is added after that is read in its place, and a copy of the
+	// world has its own facts.
+	added := world(1)
+	matched, err = added.QueryMatch(rule, testTrusted, syms)
+	require.NoError(t, err)
+	require.True(t, matched)
+	other := added.Clone()
+	added.AddFact(testOrigin, Fact{Predicate{value, []Term{Integer(-1), Integer(0)}}})
+	_, err = added.QueryMatch(rule, testTrusted, syms)
+	require.ErrorIs(t, err, ErrExprDivByZero)
+	matched, err = other.QueryMatch(rule, testTrusted, syms)
+	require.NoError(t, err)
+	require.True(t, matched)
 
 	all, err := world(1, 5, 0).QueryMatchAll(rule, testTrusted, syms)
 	require.NoError(t, err)

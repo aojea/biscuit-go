@@ -407,25 +407,29 @@ func TestAuthorizeExecutionError(t *testing.T) {
 }
 
 // A check and a policy stop at their first match: an expression that would
-// fail on a fact after it is not evaluated.
+// fail on a fact after it is not evaluated. The facts are read in the order
+// of biscuit-rust, which is the order of their terms and not the order in
+// which they were added.
 func TestAuthorizeStopsAtFirstMatch(t *testing.T) {
 	publicRoot, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
 	token, err := NewBuilder(privateRoot).Build()
 	require.NoError(t, err)
 
-	// value($x), 10 / $x > 4
+	// value($k, $x), 10 / $x > 4
 	query := []Rule{{
 		Head: Predicate{Name: "query"},
-		Body: []Predicate{{Name: "value", IDs: []Term{Variable("x")}}},
+		Body: []Predicate{{Name: "value", IDs: []Term{Variable("k"), Variable("x")}}},
 		Expressions: []Expression{{
 			Value{Integer(10)}, Value{Variable("x")}, BinaryDiv, Value{Integer(4)}, BinaryGreaterThan,
 		}},
 	}}
+	// The values are read in the order given: their position is the first
+	// term of the fact. They are added last first.
 	authorize := func(values []int64, add func(Authorizer)) error {
 		ab, err := token.AuthorizerFrom(RootKey(publicRoot))
 		require.NoError(t, err)
-		for _, v := range values {
-			ab.AddFact(Fact{Predicate{Name: "value", IDs: []Term{Integer(v)}}})
+		for i := len(values) - 1; i >= 0; i-- {
+			ab.AddFact(Fact{Predicate{Name: "value", IDs: []Term{Integer(i), Integer(values[i])}}})
 		}
 		add(ab)
 		ab.AddPolicy(DefaultAllowPolicy)
@@ -447,7 +451,7 @@ func TestAuthorizeStopsAtFirstMatch(t *testing.T) {
 	// match, as in biscuit-rust. Only a token that no builder made has one.
 	unbound := []Rule{{
 		Head: Predicate{Name: "query", IDs: []Term{Variable("y")}},
-		Body: []Predicate{{Name: "value", IDs: []Term{Variable("x")}}},
+		Body: []Predicate{{Name: "value", IDs: []Term{Variable("k"), Variable("x")}}},
 	}}
 	require.ErrorContains(t, authorize([]int64{1}, func(a Authorizer) { a.AddCheck(Check{Queries: unbound}) }), "check if")
 	require.NoError(t, authorize([]int64{1}, func(a Authorizer) { a.AddCheck(Check{Kind: CheckKindReject, Queries: unbound}) }))

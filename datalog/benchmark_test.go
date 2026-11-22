@@ -165,6 +165,77 @@ func BenchmarkWorldQueryRule(b *testing.B) {
 	}
 }
 
+// The same check with QueryMatch, which the authorizer uses for a check and
+// a policy: it reads the facts in the order of biscuit-rust and stops at
+// the first match. The facts are added in another order than the sorted
+// one. The world sorts them for its first query ("first") and the queries
+// after it read the sorted copy ("next").
+func BenchmarkWorldQueryMatch(b *testing.B) {
+	for _, n := range []int{10, 100, 1000} {
+		syms := &SymbolTable{}
+		right := syms.Insert("right")
+		resource := syms.Insert("resource")
+		operation := syms.Insert("operation")
+		check := syms.Insert("check")
+		read := syms.Insert("read")
+		files := make([]Term, n)
+		for i := range n {
+			files[i] = syms.Insert(fmt.Sprintf("/file%d", i))
+		}
+
+		w := benchWorld()
+		for i := range n {
+			// 7919 is a prime: each file is added one time.
+			w.AddFact(NewOrigin(0), Fact{Predicate{right, []Term{files[i*7919%n], read}}})
+		}
+		w.AddFact(NewOrigin(0), Fact{Predicate{resource, []Term{files[n-1]}}})
+		w.AddFact(NewOrigin(0), Fact{Predicate{operation, []Term{read}}})
+
+		queries := []struct {
+			name string
+			rule Rule
+		}{
+			// check if resource($f), operation($op), right($f, $op)
+			{"join", Rule{
+				Head: Predicate{check, nil},
+				Body: []Predicate{
+					{resource, []Term{Variable(0)}},
+					{operation, []Term{Variable(1)}},
+					{right, []Term{Variable(0), Variable(1)}},
+				},
+			}},
+			// check if right("/file<n-1>", "read")
+			{"one", Rule{
+				Head: Predicate{check, nil},
+				Body: []Predicate{{right, []Term{files[n-1], read}}},
+			}},
+		}
+		for _, query := range queries {
+			b.Run(fmt.Sprintf("%s/rights=%d/first", query.name, n), func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					b.StopTimer()
+					fresh := w.Clone()
+					b.StartTimer()
+					matched, err := fresh.QueryMatch(query.rule, DefaultTrustedOrigins(), syms)
+					if err != nil || !matched {
+						b.Fatalf("got %v (%v), want a match", matched, err)
+					}
+				}
+			})
+			b.Run(fmt.Sprintf("%s/rights=%d/next", query.name, n), func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					matched, err := w.QueryMatch(query.rule, DefaultTrustedOrigins(), syms)
+					if err != nil || !matched {
+						b.Fatalf("got %v (%v), want a match", matched, err)
+					}
+				}
+			})
+		}
+	}
+}
+
 func BenchmarkSetEqual(b *testing.B) {
 	const n = 10
 	strs := make(Set, n)

@@ -5,12 +5,14 @@ package datalog
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -466,7 +468,11 @@ type scopedRule struct {
 type World struct {
 	// facts is kept sorted by origin so that iteration is deterministic.
 	facts []originFacts
-	rules []scopedRule
+	// ordered is a copy of facts with the facts of each origin in the order
+	// of candidates. It is nil until a check or a policy reads the facts,
+	// and after a fact is added.
+	ordered atomic.Pointer[[]originFacts]
+	rules   []scopedRule
 
 	runLimits runLimits
 	externs   ExternFuncs
@@ -493,8 +499,10 @@ func (w *World) AddFact(origin Origin, f Fact) bool {
 }
 
 // factsOf returns the facts of origin, adding the origin when the world has
-// none. The pointer is valid until the next origin is added.
+// none. The pointer is valid until the next origin is added. The caller
+// adds a fact: the sorted copy of the facts is dropped.
 func (w *World) factsOf(origin Origin) *FactSet {
+	w.ordered.Store(nil)
 	i, found := slices.BinarySearchFunc(w.facts, origin, func(of originFacts, o Origin) int {
 		return of.origin.Compare(o)
 	})
@@ -534,8 +542,12 @@ func (w *World) factCount() int {
 
 // visibleFacts flattens the facts whose origin is trusted.
 func (w *World) visibleFacts(trusted TrustedOrigins) []factWithOrigin {
+	return flattenTrusted(w.facts, trusted)
+}
+
+func flattenTrusted(groups []originFacts, trusted TrustedOrigins) []factWithOrigin {
 	var res []factWithOrigin
-	for _, of := range w.facts {
+	for _, of := range groups {
 		if !trusted.Contains(of.origin) {
 			continue
 		}
@@ -544,6 +556,36 @@ func (w *World) visibleFacts(trusted TrustedOrigins) []factWithOrigin {
 		}
 	}
 	return res
+}
+
+// candidates returns the visible facts in the order in which biscuit-rust
+// reads the facts that can match a predicate: by origin, then by their
+// terms. The specification does not give an order. A check or a policy
+// stops at its first match, so the order decides if a later fact that makes
+// an expression fail is read: with the order of biscuit-rust, the two
+// implementations give the same result.
+//
+// The facts are sorted one time, when a check or a policy first reads them,
+// and again only after a fact is added: the checks and the policies of an
+// authorization read the same sorted facts.
+func (w *World) candidates(trusted TrustedOrigins) []factWithOrigin {
+	ordered := w.ordered.Load()
+	if ordered == nil {
+		groups := make([]originFacts, len(w.facts))
+		for i, of := range w.facts {
+			facts := slices.Clone(of.facts)
+			slices.SortStableFunc(facts, func(a, b Fact) int {
+				if c := cmp.Compare(a.Name, b.Name); c != 0 {
+					return c
+				}
+				return slices.CompareFunc(a.Terms, b.Terms, compareTerms)
+			})
+			groups[i] = originFacts{origin: of.origin, facts: facts}
+		}
+		ordered = &groups
+		w.ordered.Store(ordered)
+	}
+	return flattenTrusted(*ordered, trusted)
 }
 
 // AddRule adds a rule from block blockID, reading the facts of the trusted
@@ -616,6 +658,7 @@ func (w *World) Run(syms *SymbolTable) error {
 			// Insert scans the facts of the origin
 			if err := budget.tick(len(*facts) + 1); err != nil {
 				w.facts = prevFacts
+				w.ordered.Store(nil)
 				return err
 			}
 			facts.Insert(nf.fact)
@@ -679,7 +722,8 @@ func (w *World) QueryRule(rule Rule, blockID BlockID, trusted TrustedOrigins, sy
 // trusted origins: its body matches and its expressions hold. It stops at
 // the first match, as the specification asks for the queries of a check or
 // a policy: the facts after it are not read, so an expression that would
-// fail on one of them does not.
+// fail on one of them does not. The facts are read in the order of
+// biscuit-rust: by origin, then by their terms.
 //
 // A rule whose head has a variable that the body does not bind has no
 // match, as in biscuit-rust, where a binding that cannot make the head is
@@ -688,7 +732,7 @@ func (w *World) QueryRule(rule Rule, blockID BlockID, trusted TrustedOrigins, sy
 func (w *World) QueryMatch(rule Rule, trusted TrustedOrigins, syms *SymbolTable) (bool, error) {
 	headBound := rule.Validate() == nil
 	found := false
-	err := combine(rule.variables(), rule.Body, w.visibleFacts(trusted), nil, func(res match) (bool, error) {
+	err := combine(rule.variables(), rule.Body, w.candidates(trusted), nil, func(res match) (bool, error) {
 		ok, err := holds(rule.Expressions, res.vars, syms, w.externs)
 		if err != nil {
 			return false, err
@@ -708,7 +752,7 @@ func (w *World) QueryMatch(rule Rule, trusted TrustedOrigins, syms *SymbolTable)
 // expressions do not hold.
 func (w *World) QueryMatchAll(rule Rule, trusted TrustedOrigins, syms *SymbolTable) (bool, error) {
 	found, all := false, true
-	err := combine(rule.variables(), rule.Body, w.visibleFacts(trusted), nil, func(res match) (bool, error) {
+	err := combine(rule.variables(), rule.Body, w.candidates(trusted), nil, func(res match) (bool, error) {
 		found = true
 		ok, err := holds(rule.Expressions, res.vars, syms, w.externs)
 		if err != nil {
