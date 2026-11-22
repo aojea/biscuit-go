@@ -120,7 +120,9 @@ func IsMapKey(t Term) bool {
 // compareTerms orders terms as biscuit-rust does: by type, in the order of
 // the TermType values, then by value. A string has the order of its index in
 // the symbol table, not of its text. This is the order of the elements of a
-// set.
+// set. The root package has the same function for the terms of a builder,
+// where a string has the order of its text: the two must stay the same in
+// all other points.
 func compareTerms(a, b Term) int {
 	if c := cmp.Compare(a.Type(), b.Type()); c != 0 {
 		return c

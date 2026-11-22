@@ -4,10 +4,11 @@
 package biscuit
 
 import (
+	"bytes"
+	"cmp"
 	"encoding/hex"
 	"fmt"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -607,7 +608,11 @@ func (r Rule) validate() error {
 	return nil
 }
 
+// convert gives the symbols of the rule in the order of biscuit-rust: the
+// head, the body, then the expressions.
 func (r Rule) convert(symbols *datalog.SymbolTable) datalog.Rule {
+	head := r.Head.convert(symbols)
+
 	dlBody := make([]datalog.Predicate, len(r.Body))
 	for i, p := range r.Body {
 		dlBody[i] = p.convert(symbols)
@@ -618,7 +623,7 @@ func (r Rule) convert(symbols *datalog.SymbolTable) datalog.Rule {
 		dlExpressions[i] = e.convert(symbols)
 	}
 	return datalog.Rule{
-		Head:        r.Head.convert(symbols),
+		Head:        head,
 		Body:        dlBody,
 		Expressions: dlExpressions,
 		Scopes:      slices.Clone(r.Scopes),
@@ -1093,14 +1098,16 @@ type Predicate struct {
 	IDs  []Term
 }
 
+// convert gives the name its symbol before the terms, as biscuit-rust does.
 func (p Predicate) convert(symbols *datalog.SymbolTable) datalog.Predicate {
+	name := symbols.Insert(p.Name)
 	var ids []datalog.Term
 	for _, a := range p.IDs {
 		ids = append(ids, a.convert(symbols))
 	}
 
 	return datalog.Predicate{
-		Name:  symbols.Insert(p.Name),
+		Name:  name,
 		Terms: ids,
 	}
 }
@@ -1196,23 +1203,103 @@ func (Null) String() string { return "null" }
 type Set []Term
 
 func (a Set) Type() TermType { return TermTypeSet }
-func (a Set) convert(symbols *datalog.SymbolTable) datalog.Term {
-	datalogSet := make(datalog.Set, 0, len(a))
-	for _, e := range a {
-		datalogSet = append(datalogSet, e.convert(symbols))
-	}
-	return datalogSet
+
+// canonical returns the elements as biscuit-rust keeps a set: in the order
+// of their value, a string by its text, each element once.
+func (a Set) canonical() Set {
+	sorted := slices.Clone(a)
+	slices.SortStableFunc(sorted, compareTerms)
+	return slices.CompactFunc(sorted, func(x, y Term) bool { return compareTerms(x, y) == 0 })
 }
-func (a Set) String() string {
-	elts := make([]string, 0, len(a))
-	for _, e := range a {
-		elts = append(elts, e.String())
+
+// convert gives the elements their symbols in the order in which
+// biscuit-rust keeps a set, so that the same source gives the same symbol
+// table.
+func (a Set) convert(symbols *datalog.SymbolTable) datalog.Term {
+	sorted := a.canonical()
+	elements := make([]datalog.Term, len(sorted))
+	for i, e := range sorted {
+		elements[i] = e.convert(symbols)
 	}
-	if len(elts) == 0 {
+	return datalog.NewSet(elements...)
+}
+
+// String prints the set as the block has it: see canonical.
+func (a Set) String() string {
+	if len(a) == 0 {
 		return "{,}"
 	}
-	sort.Strings(elts)
+	sorted := a.canonical()
+	elts := make([]string, 0, len(sorted))
+	for _, e := range sorted {
+		elts = append(elts, e.String())
+	}
 	return fmt.Sprintf("{%s}", strings.Join(elts, ", "))
+}
+
+// compareTerms orders terms as biscuit-rust orders the terms of a builder:
+// by type, in the order of the TermType values, then by value. A string has
+// the order of its text. The datalog package has the same function for its
+// own terms, where a string has the order of its symbol: the two must stay
+// the same in all other points.
+func compareTerms(a, b Term) int {
+	if c := cmp.Compare(a.Type(), b.Type()); c != 0 {
+		return c
+	}
+	switch a := a.(type) {
+	case Variable:
+		if b, ok := b.(Variable); ok {
+			return cmp.Compare(a, b)
+		}
+	case Integer:
+		if b, ok := b.(Integer); ok {
+			return cmp.Compare(a, b)
+		}
+	case String:
+		if b, ok := b.(String); ok {
+			return cmp.Compare(a, b)
+		}
+	case Date:
+		if b, ok := b.(Date); ok {
+			return cmp.Compare(uint64(time.Time(a).Unix()), uint64(time.Time(b).Unix()))
+		}
+	case Bytes:
+		if b, ok := b.(Bytes); ok {
+			return bytes.Compare(a, b)
+		}
+	case Bool:
+		if b, ok := b.(Bool); ok && a != b {
+			if b {
+				return -1
+			}
+			return 1
+		}
+	case Set:
+		if b, ok := b.(Set); ok {
+			x, y := slices.Clone(a), slices.Clone(b)
+			slices.SortStableFunc(x, compareTerms)
+			slices.SortStableFunc(y, compareTerms)
+			return slices.CompareFunc(x, y, compareTerms)
+		}
+	case Array:
+		if b, ok := b.(Array); ok {
+			return slices.CompareFunc(a, b, compareTerms)
+		}
+	case Map:
+		if b, ok := b.(Map); ok {
+			x, y := slices.Clone(a), slices.Clone(b)
+			byKey := func(e, f MapEntry) int { return compareTerms(e.Key, f.Key) }
+			slices.SortStableFunc(x, byKey)
+			slices.SortStableFunc(y, byKey)
+			return slices.CompareFunc(x, y, func(e, f MapEntry) int {
+				if c := compareTerms(e.Key, f.Key); c != 0 {
+					return c
+				}
+				return compareTerms(e.Value, f.Value)
+			})
+		}
+	}
+	return 0
 }
 
 // Array is an ordered sequence of terms of any type (datalog v3.3).
@@ -1245,16 +1332,40 @@ type MapEntry struct {
 type Map []MapEntry
 
 func (m Map) Type() TermType { return TermTypeMap }
+
+// canonical returns the entries as biscuit-rust keeps a map: integer keys
+// by value, then string keys by text. A key given twice keeps its last
+// value.
+func (m Map) canonical() Map {
+	sorted := slices.Clone(m)
+	slices.SortStableFunc(sorted, func(a, b MapEntry) int { return compareTerms(a.Key, b.Key) })
+	entries := sorted[:0]
+	for i, e := range sorted {
+		if i+1 < len(sorted) && compareTerms(e.Key, sorted[i+1].Key) == 0 {
+			continue
+		}
+		entries = append(entries, e)
+	}
+	return entries
+}
+
+// convert gives the keys and the values their symbols in the order in which
+// biscuit-rust keeps a map, so that the same source gives the same symbol
+// table.
 func (m Map) convert(symbols *datalog.SymbolTable) datalog.Term {
-	entries := make([]datalog.MapEntry, len(m))
-	for i, e := range m {
+	sorted := m.canonical()
+	entries := make([]datalog.MapEntry, len(sorted))
+	for i, e := range sorted {
 		entries[i] = datalog.MapEntry{Key: e.Key.convert(symbols), Value: e.Value.convert(symbols)}
 	}
 	return datalog.NewMap(entries...)
 }
+
+// String prints the map as the block has it: see canonical.
 func (m Map) String() string {
-	entries := make([]string, len(m))
-	for i, e := range m {
+	sorted := m.canonical()
+	entries := make([]string, len(sorted))
+	for i, e := range sorted {
 		entries[i] = fmt.Sprintf("%s: %s", e.Key, e.Value)
 	}
 	return fmt.Sprintf("{%s}", strings.Join(entries, ", "))

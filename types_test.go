@@ -57,3 +57,49 @@ func TestFromDatalogFact(t *testing.T) {
 	}
 	require.Equal(t, expectedFact, fact)
 }
+
+// The builders give the strings their symbols in the order of biscuit-rust,
+// so that the same source gives the same symbol table, and thus the same
+// print of a set of strings: the name of a predicate before its terms, the
+// head of a rule before its body, the elements of a set by value, the
+// integer keys of a map before its string keys.
+func TestConvertSymbolOrder(t *testing.T) {
+	symbols := func(convert func(*datalog.SymbolTable)) []string {
+		syms := &datalog.SymbolTable{}
+		convert(syms)
+		return *syms
+	}
+
+	require.Equal(t, []string{"f", "b", "a"}, symbols(func(s *datalog.SymbolTable) {
+		Predicate{Name: "f", IDs: []Term{String("b"), String("a")}}.convert(s)
+	}))
+	require.Equal(t, []string{"r", "x", "f", "b"}, symbols(func(s *datalog.SymbolTable) {
+		Rule{
+			Head: Predicate{Name: "r", IDs: []Term{Variable("x")}},
+			Body: []Predicate{{Name: "f", IDs: []Term{Variable("x"), String("b")}}},
+		}.convert(s)
+	}))
+	require.Equal(t, []string{"a", "b", "c"}, symbols(func(s *datalog.SymbolTable) {
+		Set{String("c"), String("a"), String("b"), String("a")}.convert(s)
+	}))
+	require.Equal(t, []string{"y", "x", "a", "w", "b", "v"}, symbols(func(s *datalog.SymbolTable) {
+		Map{{String("b"), String("v")}, {Integer(3), String("x")}, {String("a"), String("w")}, {Integer(1), String("y")}}.convert(s)
+	}))
+	// A key given twice keeps its last value: the other value has no symbol.
+	require.Equal(t, []string{"a", "kept"}, symbols(func(s *datalog.SymbolTable) {
+		Map{{String("a"), String("dropped")}, {String("a"), String("kept")}}.convert(s)
+	}))
+
+	// The set has the order of the symbols, and not that of the text, when
+	// a string had its symbol before.
+	syms := &datalog.SymbolTable{}
+	b := syms.Insert("b")
+	set := Set{String("b"), String("a")}.convert(syms)
+	require.Equal(t, datalog.Set{b, syms.Insert("a")}, set)
+
+	// The builder prints a set and a map as the block has them.
+	require.Equal(t, "{-1, 9, 10}", Set{Integer(10), Integer(9), Integer(-1), Integer(9)}.String())
+	require.Equal(t, `{1: "x", "a": 2, "b": 3}`, Map{
+		{String("b"), Integer(1)}, {String("a"), Integer(2)}, {String("b"), Integer(3)}, {Integer(1), String("x")},
+	}.String())
+}
