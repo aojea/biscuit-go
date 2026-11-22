@@ -4,6 +4,8 @@
 package biscuit
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"math"
 	"testing"
 	"time"
@@ -867,6 +869,69 @@ func TestUnmarshalRejectsMissingRequiredFields(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+// A string that is not UTF-8 is refused, as in a block: biscuit-rust and
+// the two parsers have no such string.
+func TestBlockConvertRefusesInvalidUTF8(t *testing.T) {
+	_, err := protoBlockToTokenBlock(&pb.Block{Version: proto.Uint32(3), Symbols: []string{"abc", "a\xff"}}, nil)
+	require.ErrorContains(t, err, "a symbol is not valid UTF-8")
+	_, err = protoBlockToTokenBlock(&pb.Block{Version: proto.Uint32(3), Context: proto.String("\xff")}, nil)
+	require.ErrorContains(t, err, "the context is not valid UTF-8")
+	_, err = protoBlockToTokenBlock(&pb.Block{Version: proto.Uint32(3), Symbols: []string{"é√😀"}, Context: proto.String("é")}, nil)
+	require.NoError(t, err)
+
+	// The same through a token: the block is read before the signatures.
+	block, err := proto.Marshal(&pb.Block{Version: proto.Uint32(3), Symbols: []string{"\xff"}})
+	require.NoError(t, err)
+	token, err := proto.Marshal(&pb.Biscuit{
+		Authority: &pb.SignedBlock{
+			Block:     block,
+			NextKey:   &pb.PublicKey{Algorithm: pb.PublicKey_Ed25519.Enum(), Key: make([]byte, 32)},
+			Signature: make([]byte, 64),
+		},
+		Proof: &pb.Proof{Content: &pb.Proof_NextSecret{NextSecret: make([]byte, 32)}},
+	})
+	require.NoError(t, err)
+	_, err = Unmarshal(token)
+	require.ErrorContains(t, err, "a symbol is not valid UTF-8")
+}
+
+// The builders refuse the strings that Unmarshal refuses, so that the
+// tokens that they make can be read. The same for the saved policies.
+func TestBuildRefusesInvalidUTF8(t *testing.T) {
+	publicRoot, privateRoot, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	invalid := Fact{Predicate{Name: "right", IDs: []Term{String("a\xff")}}}
+
+	builder := NewBuilder(privateRoot)
+	require.NoError(t, builder.AddAuthorityFact(invalid))
+	_, err = builder.Build()
+	require.ErrorContains(t, err, "a symbol is not valid UTF-8")
+
+	builder = NewBuilder(privateRoot)
+	builder.SetContext("\xff")
+	_, err = builder.Build()
+	require.ErrorContains(t, err, "the context is not valid UTF-8")
+
+	token, err := NewBuilder(privateRoot).Build()
+	require.NoError(t, err)
+	block := token.CreateBlock()
+	require.NoError(t, block.AddFact(invalid))
+	_, err = token.Append(rand.Reader, block.Build())
+	require.ErrorContains(t, err, "a symbol is not valid UTF-8")
+
+	saver, err := token.AuthorizerFrom(RootKey(publicRoot))
+	require.NoError(t, err)
+	saver.AddFact(invalid)
+	_, err = saver.SerializePolicies()
+	require.ErrorContains(t, err, "a symbol is not valid UTF-8")
+
+	saved, err := proto.Marshal(&pb.AuthorizerPolicies{Version: proto.Uint32(3), Symbols: []string{"a\xff"}})
+	require.NoError(t, err)
+	loader, err := token.AuthorizerFrom(RootKey(publicRoot))
+	require.NoError(t, err)
+	require.ErrorContains(t, loader.LoadPolicies(saved), "a symbol is not valid UTF-8")
 }
 
 // biscuit-rust refuses these blocks: a block of version 3 where a check has

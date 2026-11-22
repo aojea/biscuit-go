@@ -779,6 +779,21 @@ func TestParseNegationGroups(t *testing.T) {
 	}
 }
 
+// A source is text. The parser refuses one that is not valid UTF-8: a token
+// cannot have such a string, and biscuit-rust cannot be given such a source.
+func TestParseRefusesInvalidUTF8(t *testing.T) {
+	p := New()
+	_, err := p.Fact("right(\"a\xff\")", nil)
+	require.ErrorIs(t, err, ErrInvalidUTF8)
+	_, err = p.Block("right(\"a\xff\");", nil)
+	require.ErrorIs(t, err, ErrInvalidUTF8)
+	_, err = p.Authorizer("allow if right(\"a\xff\");", nil)
+	require.ErrorIs(t, err, ErrInvalidUTF8)
+
+	_, err = p.Block("right(\"é√😀\");", nil)
+	require.NoError(t, err)
+}
+
 // The parser calls itself for each level of nesting. A source that is
 // nested too deep is refused before the parser reads it: without the limit
 // it stops the process with a stack overflow, which no caller can recover.

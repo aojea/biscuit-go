@@ -6,6 +6,7 @@ package parser
 import (
 	"errors"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/alecthomas/participle/v2"
 	"github.com/alecthomas/participle/v2/lexer"
@@ -21,6 +22,9 @@ var (
 	// ErrNestingTooDeep is returned for a source with more levels of
 	// parentheses, brackets, braces and `!` than the parser accepts.
 	ErrNestingTooDeep = errors.New("parser: the source is nested too deep")
+	// ErrInvalidUTF8 is returned for a source that is not valid UTF-8. A
+	// token cannot have a string that is not UTF-8.
+	ErrInvalidUTF8 = errors.New("parser: the source is not valid UTF-8")
 )
 
 // Rules are tried in order and the first match wins. Word-like rules need \b
@@ -170,6 +174,9 @@ func checkNesting(source string) error {
 
 // parse reads a source with one of the parsers of the grammar.
 func parse[T any](parser *participle.Parser[T], name string, source string) (*T, error) {
+	if !utf8.ValidString(source) {
+		return nil, ErrInvalidUTF8
+	}
 	if err := checkNesting(source); err != nil {
 		return nil, err
 	}

@@ -530,6 +530,9 @@ func (v *authorizer) LoadPolicies(authorizerPolicies []byte) error {
 // translated to the table of the authorizer, which keeps the symbols of the
 // token and of the facts that it already has.
 func (v *authorizer) loadPoliciesV2(pbPolicies *pb.AuthorizerPolicies) error {
+	if err := checkUTF8(pbPolicies.Symbols, ""); err != nil {
+		return fmt.Errorf("verifier: load policies v1: %w", err)
+	}
 	symbols := datalog.SymbolTable(pbPolicies.Symbols)
 
 	for _, pbFact := range pbPolicies.Facts {
@@ -669,6 +672,10 @@ func (v *authorizer) SerializePolicies() ([]byte, error) {
 		}
 
 		protoPolicies[i] = protoPolicy
+	}
+
+	if err := checkUTF8(*v.symbols, ""); err != nil {
+		return nil, fmt.Errorf("verifier: serialize policies: %w", err)
 	}
 
 	version := MaxSchemaVersion

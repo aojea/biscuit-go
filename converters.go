@@ -4,7 +4,9 @@
 package biscuit
 
 import (
+	"errors"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/eclipse-biscuit/biscuit-go/v2/datalog"
 	"github.com/eclipse-biscuit/biscuit-go/v2/pb"
@@ -14,6 +16,9 @@ import (
 // tokenBlockToProtoBlock serializes a block. keys is the key table of the
 // token before this block; the keys the block introduces come after.
 func tokenBlockToProtoBlock(input *Block, keys publicKeyTable) (*pb.Block, error) {
+	if err := checkUTF8(*input.symbols, input.context); err != nil {
+		return nil, fmt.Errorf("biscuit: failed to convert token block to proto block: %w", err)
+	}
 	keys, err := keys.extend(input.publicKeys...)
 	if err != nil {
 		return nil, err
@@ -69,9 +74,31 @@ func tokenBlockToProtoBlock(input *Block, keys publicKeyTable) (*pb.Block, error
 	return out, nil
 }
 
+// checkUTF8 refuses the symbols and the context of a block, or the symbols
+// of saved policies, that are not valid UTF-8. The schema is a proto2
+// schema, and the protobuf library does not check a string of such a
+// schema. biscuit-rust refuses a block with a string that is not UTF-8. The
+// builders refuse what Unmarshal refuses, so that the tokens that they make
+// can be read.
+func checkUTF8(symbols []string, context string) error {
+	for _, symbol := range symbols {
+		if !utf8.ValidString(symbol) {
+			return errors.New("a symbol is not valid UTF-8")
+		}
+	}
+	if !utf8.ValidString(context) {
+		return errors.New("the context is not valid UTF-8")
+	}
+	return nil
+}
+
 // protoBlockToTokenBlock deserializes a block. keys is the key table of the
 // token before this block; the keys the block introduces come after.
 func protoBlockToTokenBlock(input *pb.Block, keys publicKeyTable) (*Block, error) {
+	if err := checkUTF8(input.Symbols, input.GetContext()); err != nil {
+		return nil, fmt.Errorf("biscuit: failed to convert proto block to token block: %w", err)
+	}
+
 	symbols := datalog.SymbolTable(input.Symbols)
 
 	var facts datalog.FactSet
