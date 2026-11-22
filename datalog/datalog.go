@@ -850,15 +850,24 @@ func combine(
 	}
 }
 
+// ErrNotBool is returned when an expression of a rule, a check or a policy
+// evaluates to a term that is not a boolean.
+var ErrNotBool = errors.New("datalog: expression does not evaluate to a boolean")
+
 // holds evaluates the expressions of a rule for one binding, in order, up to
-// the first one that is not true.
+// the first one that is false. An expression that does not evaluate to a
+// boolean is an error, as in biscuit-rust: it is not a binding that fails.
 func holds(expressions []Expression, vars map[Variable]*Term, syms *SymbolTable, externs ExternFuncs) (bool, error) {
 	for _, e := range expressions {
 		res, err := e.EvaluateWith(vars, syms, externs)
 		if err != nil {
 			return false, err
 		}
-		if !res.Equal(Bool(true)) {
+		b, ok := res.(Bool)
+		if !ok {
+			return false, fmt.Errorf("%w: %s", ErrNotBool, e.Print(syms))
+		}
+		if !b {
 			return false, nil
 		}
 	}

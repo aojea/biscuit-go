@@ -386,6 +386,24 @@ func TestAuthorizeExecutionError(t *testing.T) {
 		require.ErrorIs(t, err, ErrExecution)
 		require.ErrorIs(t, err, datalog.ErrInt64Overflow)
 	}
+
+	// An expression that does not evaluate to a boolean is an execution
+	// error as well, and not a check that fails.
+	notBool := []Rule{{Head: Predicate{Name: "query"}, Expressions: []Expression{{Value{Integer(1)}}}}}
+	for _, add := range []func(Authorizer){
+		func(a Authorizer) { a.AddCheck(Check{Queries: notBool}) },
+		func(a Authorizer) { a.AddCheck(Check{Kind: CheckKindAll, Queries: notBool}) },
+		func(a Authorizer) { a.AddCheck(Check{Kind: CheckKindReject, Queries: notBool}) },
+		func(a Authorizer) { a.AddPolicy(Policy{Kind: PolicyKindDeny, Queries: notBool}) },
+	} {
+		ab, err = plain.AuthorizerFrom(RootKey(publicRoot))
+		require.NoError(t, err)
+		add(ab)
+		ab.AddPolicy(DefaultAllowPolicy)
+		err = ab.Authorize()
+		require.ErrorIs(t, err, ErrExecution)
+		require.ErrorIs(t, err, datalog.ErrNotBool)
+	}
 }
 
 // A check and a policy stop at their first match: an expression that would

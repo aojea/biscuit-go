@@ -731,6 +731,33 @@ func TestWorldQueryStopsAtFirstMatch(t *testing.T) {
 	require.Len(t, *facts, 2)
 }
 
+// An expression of a rule that does not evaluate to a boolean is an error,
+// as in biscuit-rust, and not a match that fails.
+func TestWorldExpressionNotBool(t *testing.T) {
+	syms := &SymbolTable{}
+	rule := Rule{
+		Head:        Predicate{syms.Insert("ok"), nil},
+		Expressions: []Expression{{Value{Integer(1)}, Value{Integer(1)}, BinaryOp{Add{}}}},
+	}
+	w := NewWorld()
+
+	_, err := w.QueryMatch(rule, testTrusted, syms)
+	require.ErrorIs(t, err, ErrNotBool)
+	_, err = w.QueryMatchAll(rule, testTrusted, syms)
+	require.ErrorIs(t, err, ErrNotBool)
+	_, err = w.QueryRule(rule, 0, testTrusted, syms)
+	require.ErrorIs(t, err, ErrNotBool)
+
+	w.AddRule(0, testTrusted, rule)
+	require.ErrorIs(t, w.Run(syms), ErrNotBool)
+
+	// An expression after one that is false is not evaluated.
+	rule.Expressions = append([]Expression{{Value{Bool(false)}}}, rule.Expressions...)
+	matched, err := NewWorld().QueryMatch(rule, testTrusted, syms)
+	require.NoError(t, err)
+	require.False(t, matched)
+}
+
 func TestWorldQueryBytesAndSetTerms(t *testing.T) {
 	w := NewWorld()
 	syms := &SymbolTable{}
