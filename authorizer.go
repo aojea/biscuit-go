@@ -251,6 +251,11 @@ func (v *authorizer) Authorize() error {
 		}
 
 		for _, rule := range block.rules {
+			// As biscuit-rust does, also when the rule matches nothing.
+			if err := rule.Validate(); err != nil {
+				debug := datalog.SymbolDebugger{SymbolTable: symbols}
+				return fmt.Errorf("%w: block %d: %s", ErrInvalidBlockRule, i, debug.Rule(rule))
+			}
 			r, err := fromDatalogRule(symbols, rule)
 			if err != nil {
 				return fmt.Errorf("biscuit: verification failed: %s", err)

@@ -135,8 +135,10 @@ func (b *builderOptions) AddAuthorityFact(fact Fact) error {
 }
 
 func (b *builderOptions) AddAuthorityRule(rule Rule) error {
-	dlRule := rule.convert(b.symbols)
-	b.rules = append(b.rules, dlRule)
+	if err := rule.validate(); err != nil {
+		return err
+	}
+	b.rules = append(b.rules, rule.convert(b.symbols))
 	return nil
 }
 
@@ -350,6 +352,9 @@ func (b *blockBuilder) AddFact(fact Fact) error {
 }
 
 func (b *blockBuilder) AddRule(rule Rule) error {
+	if err := rule.validate(); err != nil {
+		return err
+	}
 	dlRule := rule.convert(b.symbols)
 	b.rules = append(b.rules, dlRule)
 

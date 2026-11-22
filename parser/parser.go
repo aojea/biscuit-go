@@ -15,6 +15,9 @@ import (
 var (
 	ErrVariableInFact = errors.New("parser: a fact cannot contain any variables")
 	ErrVariableInSet  = errors.New("parser: a set cannot contain any variables")
+	// ErrUnboundVariable is returned for a rule that has a variable, in its
+	// head or in an expression, that no predicate of its body binds.
+	ErrUnboundVariable = errors.New("parser: the rule contains variables that are not bound by predicates in the rule's body")
 )
 
 // Rules are tried in order and the first match wins. Word-like rules need \b

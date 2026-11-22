@@ -44,7 +44,8 @@ var (
 	ErrInvalidAuthorityFact = errors.New("biscuit: invalid authority fact")
 	// ErrInvalidBlockFact occurs when a block fact provides an authority or ambient fact
 	ErrInvalidBlockFact = errors.New("biscuit: invalid block fact")
-	// ErrInvalidBlockRule occurs when a block rule generate an authority or ambient fact
+	// ErrInvalidBlockRule occurs when the head of a rule of a block has a
+	// variable that no predicate of its body binds.
 	ErrInvalidBlockRule = errors.New("biscuit: invalid block rule")
 	// ErrEmptyKeys is returned when verifying a biscuit having no keys
 	ErrEmptyKeys = errors.New("biscuit: empty keys")

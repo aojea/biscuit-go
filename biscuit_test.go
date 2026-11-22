@@ -444,6 +444,53 @@ func TestAuthorizeStopsAtFirstMatch(t *testing.T) {
 	}))
 }
 
+// A rule whose head has a variable that its body does not bind cannot
+// generate a fact. The builders refuse it, and the authorizer refuses a
+// token that has one, also when the rule matches nothing, as biscuit-rust
+// does.
+func TestInvalidBlockRule(t *testing.T) {
+	publicRoot, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
+	invalid := Rule{
+		Head: Predicate{Name: "right", IDs: []Term{Variable("file"), Variable("op")}},
+		Body: []Predicate{{Name: "resource", IDs: []Term{Variable("file")}}},
+	}
+	valid := Rule{
+		Head: Predicate{Name: "right", IDs: []Term{Variable("file"), String("read")}},
+		Body: []Predicate{{Name: "resource", IDs: []Term{Variable("file")}}},
+	}
+
+	builder := NewBuilder(privateRoot)
+	require.ErrorIs(t, builder.AddAuthorityRule(invalid), ErrInvalidBlockRule)
+	require.NoError(t, builder.AddAuthorityRule(valid))
+	token, err := builder.Build()
+	require.NoError(t, err)
+
+	block := token.CreateBlock()
+	require.ErrorIs(t, block.AddRule(invalid), ErrInvalidBlockRule)
+	require.NoError(t, block.AddRule(valid))
+	token, err = token.Append(rand.Reader, block.Build())
+	require.NoError(t, err)
+
+	authorize := func() error {
+		a, err := token.AuthorizerFrom(RootKey(publicRoot))
+		require.NoError(t, err)
+		a.AddPolicy(DefaultAllowPolicy)
+		return a.Authorize()
+	}
+	require.NoError(t, authorize())
+
+	// Another implementation can make a token with such a rule: put one in
+	// the block. No fact matches its body.
+	symbols := token.blocks[0].symbolTable(token.symbols)
+	token.blocks[0].rules = append(token.blocks[0].rules, datalog.Rule{
+		Head: datalog.Predicate{Name: symbols.Insert("right"), Terms: []datalog.Term{datalog.Variable(symbols.Insert("op"))}},
+		Body: []datalog.Predicate{{Name: symbols.Insert("resource"), Terms: []datalog.Term{datalog.Variable(symbols.Insert("file"))}}},
+	})
+	err = authorize()
+	require.ErrorIs(t, err, ErrInvalidBlockRule)
+	require.ErrorContains(t, err, "block 1: right($op) <- resource($file)")
+}
+
 // reject if passes when its query has no match; a block with one is v6.
 func TestBiscuitRejectIf(t *testing.T) {
 	publicRoot, privateRoot, _ := ed25519.GenerateKey(rand.Reader)

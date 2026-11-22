@@ -101,7 +101,7 @@ func getRuleTestCases() []testCase {
 
 	return []testCase{
 		{
-			Input: `grandparent("a", "c") <- parent("a", "b"), parent("b", "c"), $0 > 42, $1.starts_with("abc")`,
+			Input: `grandparent("a", "c") <- parent($0, "b"), parent("b", $1), $0 > 42, $1.starts_with("abc")`,
 			Expected: biscuit.Rule{
 				Head: biscuit.Predicate{
 					Name: "grandparent",
@@ -114,7 +114,7 @@ func getRuleTestCases() []testCase {
 					{
 						Name: "parent",
 						IDs: []biscuit.Term{
-							biscuit.String("a"),
+							biscuit.Variable("0"),
 							biscuit.String("b"),
 						},
 					},
@@ -122,7 +122,7 @@ func getRuleTestCases() []testCase {
 						Name: "parent",
 						IDs: []biscuit.Term{
 							biscuit.String("b"),
-							biscuit.String("c"),
+							biscuit.Variable("1"),
 						},
 					},
 				},
@@ -170,7 +170,7 @@ func getRuleTestCases() []testCase {
 			},
 		},
 		{
-			Input: fmt.Sprintf(`rule1("a") <- body1("b"), $0 > %s, $0 < %s`, t1.Format(time.RFC3339), t2.Format(time.RFC3339)),
+			Input: fmt.Sprintf(`rule1("a") <- body1($0), $0 > %s, $0 < %s`, t1.Format(time.RFC3339), t2.Format(time.RFC3339)),
 
 			Expected: biscuit.Rule{
 				Head: biscuit.Predicate{
@@ -179,7 +179,7 @@ func getRuleTestCases() []testCase {
 				},
 				Body: []biscuit.Predicate{{
 					Name: "body1",
-					IDs:  []biscuit.Term{biscuit.String("b")},
+					IDs:  []biscuit.Term{biscuit.Variable("0")},
 				}},
 				Expressions: []biscuit.Expression{
 					{
@@ -196,11 +196,11 @@ func getRuleTestCases() []testCase {
 			},
 		},
 		{
-			Input:         fmt.Sprintf(`rule1("a") <- body1("b"), $0 > %s`, t1.Format(time.RFC1123)),
+			Input:         fmt.Sprintf(`rule1("a") <- body1($0), $0 > %s`, t1.Format(time.RFC1123)),
 			ExpectFailure: true,
 		},
 		{
-			Input: `rule1("a") <- body1("b"), $0 > 0, $1 < 1, $2 >= 2, $3 <= 3, $4 == 4, {1, 2, 3}.contains($5), !{4,5,6}.contains($6)`,
+			Input: `rule1("a") <- body1($0, $1, $2, $3, $4, $5, $6), $0 > 0, $1 < 1, $2 >= 2, $3 <= 3, $4 == 4, {1, 2, 3}.contains($5), !{4,5,6}.contains($6)`,
 			Expected: biscuit.Rule{
 				Head: biscuit.Predicate{
 					Name: "rule1",
@@ -208,7 +208,10 @@ func getRuleTestCases() []testCase {
 				},
 				Body: []biscuit.Predicate{{
 					Name: "body1",
-					IDs:  []biscuit.Term{biscuit.String("b")},
+					IDs: []biscuit.Term{
+						biscuit.Variable("0"), biscuit.Variable("1"), biscuit.Variable("2"), biscuit.Variable("3"),
+						biscuit.Variable("4"), biscuit.Variable("5"), biscuit.Variable("6"),
+					},
 				}},
 				Expressions: []biscuit.Expression{
 					{
@@ -251,7 +254,7 @@ func getRuleTestCases() []testCase {
 			},
 		},
 		{
-			Input: `rule1("a") <- body1("b"), $0 == "abc", $1.starts_with("def"), $2.ends_with("ghi"), $3.matches("file[0-9]+.txt"), {"a","b"}.contains($4), !{"c", "d"}.contains($5)`,
+			Input: `rule1("a") <- body1($0, $1, $2, $3, $4, $5), $0 == "abc", $1.starts_with("def"), $2.ends_with("ghi"), $3.matches("file[0-9]+.txt"), {"a","b"}.contains($4), !{"c", "d"}.contains($5)`,
 			Expected: biscuit.Rule{
 				Head: biscuit.Predicate{
 					Name: "rule1",
@@ -259,7 +262,10 @@ func getRuleTestCases() []testCase {
 				},
 				Body: []biscuit.Predicate{{
 					Name: "body1",
-					IDs:  []biscuit.Term{biscuit.String("b")},
+					IDs: []biscuit.Term{
+						biscuit.Variable("0"), biscuit.Variable("1"), biscuit.Variable("2"),
+						biscuit.Variable("3"), biscuit.Variable("4"), biscuit.Variable("5"),
+					},
 				}},
 				Expressions: []biscuit.Expression{
 					{
@@ -297,7 +303,7 @@ func getRuleTestCases() []testCase {
 			},
 		},
 		{
-			Input: `rule1("a") <- body1("b"), {"a", "b"}.contains($0), !{"c", "d"}.contains($1)`,
+			Input: `rule1("a") <- body1($0, $1), {"a", "b"}.contains($0), !{"c", "d"}.contains($1)`,
 			Expected: biscuit.Rule{
 				Head: biscuit.Predicate{
 					Name: "rule1",
@@ -305,7 +311,7 @@ func getRuleTestCases() []testCase {
 				},
 				Body: []biscuit.Predicate{{
 					Name: "body1",
-					IDs:  []biscuit.Term{biscuit.String("b")},
+					IDs:  []biscuit.Term{biscuit.Variable("0"), biscuit.Variable("1")},
 				}},
 				Expressions: []biscuit.Expression{
 					{
@@ -337,7 +343,7 @@ func getRuleTestCases() []testCase {
 			},
 		},
 		{
-			Input: `rule1("a") <- body1(hex:41414141), $0 == hex:41414141`,
+			Input: `rule1("a") <- body1($0), $0 == hex:41414141`,
 			Expected: biscuit.Rule{
 				Head: biscuit.Predicate{
 					Name: "rule1",
@@ -345,7 +351,7 @@ func getRuleTestCases() []testCase {
 				},
 				Body: []biscuit.Predicate{{
 					Name: "body1",
-					IDs:  []biscuit.Term{biscuit.Bytes([]byte{0x41, 0x41, 0x41, 0x41})},
+					IDs:  []biscuit.Term{biscuit.Variable("0")},
 				}},
 				Expressions: []biscuit.Expression{
 					{
@@ -579,6 +585,45 @@ func TestParseRule(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A rule with a variable that no predicate of its body binds is refused, as
+// in biscuit-rust: an authorizer refuses a token that has such a rule.
+func TestParseRuleUnboundVariable(t *testing.T) {
+	p := New()
+	for input, unbound := range map[string]string{
+		`right($file, $op) <- resource($file)`:                 "$op",
+		`right($a, $b, $a) <- resource(1)`:                     "$a, $b",
+		`right(1) <- true, $x`:                                 "$x",
+		`right($file) <- resource($file), $size > 10`:          "$size",
+		`right($file) <- resource($file), {1}.contains($size)`: "$size",
+	} {
+		_, err := p.Rule(input, nil)
+		require.ErrorIs(t, err, ErrUnboundVariable, input)
+		require.ErrorContains(t, err, ": "+unbound, input)
+
+		_, err = p.Block(input+";", nil)
+		require.ErrorIs(t, err, ErrUnboundVariable, input)
+		_, err = p.Authorizer(input+";", nil)
+		require.ErrorIs(t, err, ErrUnboundVariable, input)
+	}
+
+	for _, input := range []string{
+		`right($file, "read") <- resource($file), owner($user, $file), $user != "eve"`,
+		// the parameter of a closure, and the variables in its body
+		`right($file) <- resource($file), [1, 2].all($p -> $p > 0)`,
+		`right($file) <- resource($file), [1, 2].all($p -> $other > 0)`,
+	} {
+		_, err := p.Rule(input, nil)
+		require.NoError(t, err, input)
+	}
+
+	// A check or a policy is not examined: its expression fails when the
+	// authorizer evaluates it.
+	_, err := p.Check(`check if resource($file), $size > 10`, nil)
+	require.NoError(t, err)
+	_, err = p.Policy(`allow if resource($file), $size > 10`, nil)
+	require.NoError(t, err)
 }
 
 func TestParserCheck(t *testing.T) {

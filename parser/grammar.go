@@ -966,12 +966,56 @@ func (r *Rule) ToBiscuit(parameters ParametersMap) (*biscuit.Rule, error) {
 		return nil, err
 	}
 
+	if unbound := unboundVariables(*head, body, expressions); len(unbound) > 0 {
+		return nil, fmt.Errorf("%w: %s", ErrUnboundVariable, strings.Join(unbound, ", "))
+	}
+
 	return &biscuit.Rule{
 		Head:        *head,
 		Body:        body,
 		Expressions: expressions,
 		Scopes:      scopes,
 	}, nil
+}
+
+// unboundVariables lists the variables of the head and of the expressions of
+// a rule that no predicate of the body binds, as biscuit-rust does: the
+// variables in the body of a closure are not examined, and a check or a
+// policy is not examined at all.
+func unboundVariables(head biscuit.Predicate, body []biscuit.Predicate, expressions []biscuit.Expression) []string {
+	bound := make(map[biscuit.Variable]struct{})
+	for _, p := range body {
+		for _, id := range p.IDs {
+			if v, ok := id.(biscuit.Variable); ok {
+				bound[v] = struct{}{}
+			}
+		}
+	}
+
+	var unbound []string
+	add := func(term biscuit.Term) {
+		v, ok := term.(biscuit.Variable)
+		if !ok {
+			return
+		}
+		if _, ok := bound[v]; ok {
+			return
+		}
+		if name := "$" + string(v); !slices.Contains(unbound, name) {
+			unbound = append(unbound, name)
+		}
+	}
+	for _, id := range head.IDs {
+		add(id)
+	}
+	for _, e := range expressions {
+		for _, op := range e {
+			if v, ok := op.(biscuit.Value); ok {
+				add(v.Term)
+			}
+		}
+	}
+	return unbound
 }
 
 func (c *Check) ToBiscuit(parameters ParametersMap) (*biscuit.Check, error) {

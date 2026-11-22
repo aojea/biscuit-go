@@ -582,6 +582,28 @@ type Rule struct {
 	Scopes []Scope
 }
 
+// validate returns ErrInvalidBlockRule if the head of the rule has a variable
+// that no predicate of the body binds. Such a rule cannot generate a fact,
+// and an authorizer refuses a token that has one.
+func (r Rule) validate() error {
+	bound := make(map[Variable]struct{})
+	for _, p := range r.Body {
+		for _, id := range p.IDs {
+			if v, ok := id.(Variable); ok {
+				bound[v] = struct{}{}
+			}
+		}
+	}
+	for _, id := range r.Head.IDs {
+		if v, ok := id.(Variable); ok {
+			if _, ok := bound[v]; !ok {
+				return fmt.Errorf("%w: the body of the rule %q does not bind $%s", ErrInvalidBlockRule, r.Head.Name, string(v))
+			}
+		}
+	}
+	return nil
+}
+
 func (r Rule) convert(symbols *datalog.SymbolTable) datalog.Rule {
 	dlBody := make([]datalog.Predicate, len(r.Body))
 	for i, p := range r.Body {

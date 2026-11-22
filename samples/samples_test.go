@@ -231,8 +231,13 @@ func CheckSample(root_key ed25519.PublicKey, c TestCase, t *testing.T) {
 
 	if err == nil {
 		fmt.Printf("  Parsed file %s\n", c.Filename)
-		// this sample uses a tampered biscuit file on purpose
-		if c.Filename != "test006_reordered_blocks.bc" {
+		switch c.Filename {
+		case "test006_reordered_blocks.bc":
+			// this sample uses a tampered biscuit file on purpose
+		case "test018_unbound_variables_in_rule.bc":
+			// the parser refuses the rule of this sample, as that of
+			// biscuit-rust does, so its source cannot be built again
+		default:
 			CompareBlocks(*token, c.Token, t)
 		}
 
@@ -332,8 +337,7 @@ func CompareError(authorization_error error, sample_error *BiscuitError, t *test
 			// todo check the block and check ids (if there is a single failed check, because the lib only reports one)
 			require.Regexp(t, "^biscuit: verification failed: failed to verify", error_string)
 		} else if sample_error.FailedLogic.InvalidBlockRule != nil {
-			// todo extract the block number
-			require.Regexp(t, "^biscuit: verification failed: failed to verify", error_string)
+			require.ErrorIs(t, authorization_error, biscuit.ErrInvalidBlockRule)
 		} else {
 			require.Fail(t, error_string)
 		}

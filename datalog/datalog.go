@@ -245,6 +245,20 @@ func (e InvalidRuleError) Error() string {
 	return fmt.Sprintf("datalog: variable %d in head is missing from body and/or constraints", e.MissingVariable)
 }
 
+// Validate returns an InvalidRuleError if the head of the rule has a variable
+// that no predicate of the body binds: such a rule cannot generate a fact.
+func (r Rule) Validate() error {
+	bound := r.variables()
+	for _, term := range r.Head.Terms {
+		if v, ok := term.(Variable); ok {
+			if _, ok := bound[v]; !ok {
+				return InvalidRuleError{r, v}
+			}
+		}
+	}
+	return nil
+}
+
 // variables lists the variables of the body, unbound.
 func (r Rule) variables() MatchedVariables {
 	variables := make(MatchedVariables)
