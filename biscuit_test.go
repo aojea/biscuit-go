@@ -538,6 +538,32 @@ func TestBlockVersionFromContent(t *testing.T) {
 		Scope:   []*pb.Scope{{Content: &pb.Scope_PublicKey{PublicKey: 0}}},
 	}, nil)
 	require.ErrorContains(t, err, "public key index 0 out of the key table")
+
+	// biscuit-rust does not count arrays, maps, .get() and .try_or() in the
+	// version of a block: it writes them in a v3 block, which must be read.
+	// A block that this library builds with one of them declares version 6.
+	fact := func(term *pb.Term) *pb.Block {
+		return &pb.Block{
+			Version: proto.Uint32(3),
+			Facts:   []*pb.Fact{{Predicate: &pb.Predicate{Name: proto.Uint64(0), Terms: []*pb.Term{term}}}},
+		}
+	}
+	integer := &pb.Term{Content: &pb.Term_Integer{Integer: 1}}
+	for _, term := range []*pb.Term{
+		{Content: &pb.Term_Array{Array: &pb.Array{Array: []*pb.Term{integer}}}},
+		{Content: &pb.Term_Map{Map: &pb.Map{Entries: []*pb.MapEntry{{
+			Key:   &pb.MapKey{Content: &pb.MapKey_Integer{Integer: 1}},
+			Value: integer,
+		}}}}},
+	} {
+		block, err := protoBlockToTokenBlock(fact(term), nil)
+		require.NoError(t, err)
+		require.EqualValues(t, 6, schemaVersion(*block.facts, nil, nil, nil))
+	}
+
+	// The other v3.3 features need a v3.3 block, as in biscuit-rust.
+	_, err = protoBlockToTokenBlock(fact(&pb.Term{Content: &pb.Term_Null{Null: &pb.Empty{}}}), nil)
+	require.ErrorContains(t, err, "block version 3 uses features of version 6")
 }
 
 func TestBiscuitBytesSetEquality(t *testing.T) {

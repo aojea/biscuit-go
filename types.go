@@ -28,10 +28,35 @@ const (
 	blockVersion3_3 uint32 = 6
 )
 
-// schemaVersion is the lowest block version able to carry the given content.
+// v33Features selects the datalog v3.3 features that make a block a v3.3
+// block.
+type v33Features bool
+
+const (
+	// allV33Features is every feature of datalog v3.3: a block that this
+	// library builds declares version 6 when it uses one of them.
+	allV33Features v33Features = true
+	// rustV33Features leaves out arrays, maps, .get() and .try_or(), which
+	// biscuit-rust does not count when it computes the version of a block:
+	// it writes them in blocks of version 3 to 5, and these must be read.
+	rustV33Features v33Features = false
+)
+
+// schemaVersion is the lowest block version able to carry the given content:
+// the version that a new block declares.
 func schemaVersion(facts datalog.FactSet, scopes []datalog.Scope, rules []datalog.Rule, checks []datalog.Check) uint32 {
+	return requiredVersion(allV33Features, facts, scopes, rules, checks)
+}
+
+// readableVersion is the lowest version that a block read from a token must
+// declare for its content. It asks for no more than biscuit-rust declares.
+func readableVersion(facts datalog.FactSet, scopes []datalog.Scope, rules []datalog.Rule, checks []datalog.Check) uint32 {
+	return requiredVersion(rustV33Features, facts, scopes, rules, checks)
+}
+
+func requiredVersion(v33 v33Features, facts datalog.FactSet, scopes []datalog.Scope, rules []datalog.Rule, checks []datalog.Check) uint32 {
 	for _, f := range facts {
-		if containsV33Term(f.Predicate) {
+		if v33.inPredicate(f.Predicate) {
 			return blockVersion3_3
 		}
 	}
@@ -40,13 +65,13 @@ func schemaVersion(facts datalog.FactSet, scopes []datalog.Scope, rules []datalo
 			return blockVersion3_3
 		}
 		for _, q := range c.Queries {
-			if containsV33Rule(q) {
+			if v33.inRule(q) {
 				return blockVersion3_3
 			}
 		}
 	}
 	for _, r := range rules {
-		if containsV33Rule(r) {
+		if v33.inRule(r) {
 			return blockVersion3_3
 		}
 	}
@@ -71,38 +96,42 @@ func schemaVersion(facts datalog.FactSet, scopes []datalog.Scope, rules []datalo
 	return blockVersion3_0
 }
 
-// containsV33Rule reports whether a rule uses a datalog v3.3 feature in its
+// inRule reports whether a rule uses a datalog v3.3 feature in its
 // predicates or expressions.
-func containsV33Rule(r datalog.Rule) bool {
-	if containsV33Term(r.Head) {
+func (v33 v33Features) inRule(r datalog.Rule) bool {
+	if v33.inPredicate(r.Head) {
 		return true
 	}
 	for _, p := range r.Body {
-		if containsV33Term(p) {
+		if v33.inPredicate(p) {
 			return true
 		}
 	}
-	return containsV33Op(r.Expressions)
+	return v33.inExpressions(r.Expressions)
 }
 
-// containsV33Term reports whether a predicate holds a term type introduced
-// in datalog v3.3: null.
-func containsV33Term(p datalog.Predicate) bool {
+// inPredicate reports whether a predicate holds a term type introduced in
+// datalog v3.3.
+func (v33 v33Features) inPredicate(p datalog.Predicate) bool {
 	for _, t := range p.Terms {
-		if isV33Term(t) {
+		if v33.isTerm(t) {
 			return true
 		}
 	}
 	return false
 }
 
-func isV33Term(t datalog.Term) bool {
+// isTerm reports whether a term has a type introduced in datalog v3.3:
+// null, also as an element of a set, and arrays and maps.
+func (v33 v33Features) isTerm(t datalog.Term) bool {
 	switch t := t.(type) {
-	case datalog.Null, datalog.Array, datalog.Map:
+	case datalog.Null:
 		return true
+	case datalog.Array, datalog.Map:
+		return v33 == allV33Features
 	case datalog.Set:
 		for _, e := range t {
-			if isV33Term(e) {
+			if v33.isTerm(e) {
 				return true
 			}
 		}
@@ -110,14 +139,14 @@ func isV33Term(t datalog.Term) bool {
 	return false
 }
 
-// containsV33Op reports whether an expression uses an operator or a term
-// introduced in datalog v3.3: the heterogeneous == and !=, null, closures.
-func containsV33Op(expressions []datalog.Expression) bool {
+// inExpressions reports whether an expression uses an operator or a term
+// introduced in datalog v3.3.
+func (v33 v33Features) inExpressions(expressions []datalog.Expression) bool {
 	for _, e := range expressions {
 		for _, op := range e {
 			switch op := op.(type) {
 			case datalog.Value:
-				if isV33Term(op.ID) {
+				if v33.isTerm(op.ID) {
 					return true
 				}
 			case datalog.Closure:
@@ -130,9 +159,13 @@ func containsV33Op(expressions []datalog.Expression) bool {
 			case datalog.BinaryOp:
 				switch op.BinaryOpFunc.Type() {
 				case datalog.BinaryHeterogeneousEqual, datalog.BinaryHeterogeneousNotEqual,
-					datalog.BinaryLazyAnd, datalog.BinaryLazyOr, datalog.BinaryAll, datalog.BinaryAny, datalog.BinaryGet,
-					datalog.BinaryFfi, datalog.BinaryTryOr:
+					datalog.BinaryLazyAnd, datalog.BinaryLazyOr, datalog.BinaryAll, datalog.BinaryAny,
+					datalog.BinaryFfi:
 					return true
+				case datalog.BinaryGet, datalog.BinaryTryOr:
+					if v33 == allV33Features {
+						return true
+					}
 				}
 			}
 		}
