@@ -75,23 +75,18 @@ type Map []MapEntry
 
 // NewMap builds a map; a key given twice keeps its last value.
 func NewMap(entries ...MapEntry) Map {
-	m := make(Map, 0, len(entries))
-	for _, e := range entries {
-		m = m.with(e)
+	m := make(Map, len(entries))
+	copy(m, entries)
+	slices.SortStableFunc(m, func(a, b MapEntry) int { return compareMapKeys(a.Key, b.Key) })
+	// Entries with the same key are next to each other, in the order given.
+	res := m[:0]
+	for i, e := range m {
+		if i+1 < len(m) && compareMapKeys(e.Key, m[i+1].Key) == 0 {
+			continue
+		}
+		res = append(res, e)
 	}
-	return m
-}
-
-func (m Map) with(e MapEntry) Map {
-	i, found := slices.BinarySearchFunc(m, e.Key, func(entry MapEntry, key Term) int {
-		return compareMapKeys(entry.Key, key)
-	})
-	if found {
-		res := slices.Clone(m)
-		res[i].Value = e.Value
-		return res
-	}
-	return slices.Insert(slices.Clone(m), i, e)
+	return res
 }
 
 // compareMapKeys orders integers before strings, then by value.

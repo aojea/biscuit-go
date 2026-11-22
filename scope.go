@@ -103,11 +103,20 @@ func (t *publicKeyTable) insert(key datalog.PublicKey) int64 {
 // refused rather than skipped, which would shift the index of every key
 // after it.
 func (t publicKeyTable) extend(keys ...datalog.PublicKey) (publicKeyTable, error) {
+	type id struct {
+		algorithm datalog.Algorithm
+		key       string
+	}
+	known := make(map[id]struct{}, len(t)+len(keys))
+	for _, k := range t {
+		known[id{k.Algorithm, string(k.Key)}] = struct{}{}
+	}
 	res := slices.Clone(t)
 	for _, k := range keys {
-		if _, known := res.index(k); known {
+		if _, ok := known[id{k.Algorithm, string(k.Key)}]; ok {
 			return nil, fmt.Errorf("%w: %s", ErrPublicKeyTableOverlap, k)
 		}
+		known[id{k.Algorithm, string(k.Key)}] = struct{}{}
 		res = append(res, k)
 	}
 	return res, nil

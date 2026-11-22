@@ -222,3 +222,23 @@ func BenchmarkExpressionEvaluate(b *testing.B) {
 		}
 	}
 }
+
+// A map term of a token is read before the signatures are checked: the cost
+// of NewMap must not grow with the square of the number of entries.
+func BenchmarkNewMap(b *testing.B) {
+	for _, n := range []int{100, 1000, 10000} {
+		entries := make([]MapEntry, n)
+		for i := range entries {
+			// keys in reverse order, so that the map is not sorted yet
+			entries[i] = MapEntry{Key: Integer(n - i), Value: Integer(i)}
+		}
+		b.Run(fmt.Sprintf("entries=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if len(NewMap(entries...)) != n {
+					b.Fatal("entries are missing")
+				}
+			}
+		})
+	}
+}
