@@ -55,6 +55,9 @@ type authorizer struct {
 	checks   []Check
 	policies []Policy
 	scopes   []Scope
+	// facts are the facts that were added to the authorizer, in order. The
+	// world has them too: this list is for the print of the world.
+	facts []Fact
 	// rules are the rules of the authorizer. They are put in the world each
 	// time it is run, once the scopes they default to are known.
 	rules []datalog.Rule
@@ -139,7 +142,7 @@ func NewVerifier(b *Biscuit, opts ...AuthorizerOption) (Authorizer, error) {
 			a.blocksByKey[key] = append(a.blocksByKey[key], datalog.BlockID(i+1))
 		}
 	}
-	a.internTokenSymbols()
+	a.internTokenSymbols(a.baseSymbols)
 
 	a.world = a.baseWorld.Clone()
 	a.symbols = a.baseSymbols.Clone()
@@ -147,30 +150,30 @@ func NewVerifier(b *Biscuit, opts ...AuthorizerOption) (Authorizer, error) {
 	return a, nil
 }
 
-// internTokenSymbols gives the strings of the token their symbols in the
-// table of the authorizer, before the content of the authorizer gets its
-// own: block by block, the facts, the rules, then the checks. biscuit-rust
-// loads a token in this order. The order of the symbols is the order of a
-// set of strings: it decides how the set prints, and which element .any()
-// and .all() see first.
+// internTokenSymbols gives the strings of the token their symbols in a
+// table: block by block, the facts, the rules, then the checks. The
+// authorizer does this before its own content gets symbols, because
+// biscuit-rust loads a token in this order. The order of the symbols is the
+// order of a set of strings: it decides how the set prints, and which
+// element .any() and .all() see first.
 //
 // A term that does not convert is ignored here: Authorize reports it.
-func (v *authorizer) internTokenSymbols() {
+func (v *authorizer) internTokenSymbols(table *datalog.SymbolTable) {
 	for _, block := range append([]*Block{v.biscuit.authority}, v.biscuit.blocks...) {
 		symbols := block.symbolTable(v.biscuit.symbols)
 		for _, fact := range *block.facts {
 			if f, err := fromDatalogFact(symbols, fact); err == nil {
-				f.convert(v.baseSymbols)
+				f.convert(table)
 			}
 		}
 		for _, rule := range block.rules {
 			if r, err := fromDatalogRule(symbols, rule); err == nil {
-				r.convert(v.baseSymbols)
+				r.convert(table)
 			}
 		}
 		for _, check := range block.checks {
 			if c, err := fromDatalogCheck(symbols, check); err == nil {
-				c.convert(v.baseSymbols)
+				c.convert(table)
 			}
 		}
 	}
@@ -199,6 +202,7 @@ func (v *authorizer) AddBlock(block ParsedBlock) {
 }
 
 func (v *authorizer) AddFact(fact Fact) {
+	v.facts = append(v.facts, fact)
 	v.world.AddFact(authorizerOrigin, fact.convert(v.symbols))
 }
 
@@ -489,15 +493,66 @@ func (v *authorizer) Biscuit() *Biscuit {
 	return v.biscuit
 }
 
-// Returns the content of the Datalog environment
-// This will be empty until the call to Authorize(), where
-// facts, rules and checks will be evaluated
+// PrintWorld returns the facts and the rules of the world, as source. The
+// facts and the rules of the token are there after Authorize or Query.
+//
+// A set of strings, and the string keys of a map, print in the order of
+// their symbols. The world is printed with a symbol table of its own, which
+// is filled as biscuit-rust fills the table of an authorizer snapshot: the
+// policies, then the facts, the rules and the checks of the authorizer, then
+// the blocks of the token. The worlds of the specification samples are
+// printed from such a snapshot. This is not the order of the table that the
+// authorizer evaluates with, where the token comes first.
 func (v *authorizer) PrintWorld() string {
-	debug := datalog.SymbolDebugger{
-		SymbolTable: v.symbols,
+	symbols, world, err := v.snapshot()
+	if err != nil {
+		// A term that does not convert: print the world as it is.
+		symbols, world = v.symbols, v.world
 	}
+	return datalog.SymbolDebugger{SymbolTable: symbols}.World(world)
+}
 
-	return debug.World(v.world)
+// snapshot translates the world to a new symbol table: see PrintWorld.
+func (v *authorizer) snapshot() (*datalog.SymbolTable, *datalog.World, error) {
+	symbols := defaultSymbolTable.Clone()
+	for _, policy := range v.policies {
+		for _, query := range policy.Queries {
+			query.convert(symbols)
+		}
+	}
+	for _, fact := range v.facts {
+		fact.convert(symbols)
+	}
+	for _, r := range v.rules {
+		rule, err := fromDatalogRule(v.symbols, r)
+		if err != nil {
+			return nil, nil, err
+		}
+		rule.convert(symbols)
+	}
+	for _, check := range v.checks {
+		check.convert(symbols)
+	}
+	v.internTokenSymbols(symbols)
+
+	world := datalog.NewWorld()
+	for _, group := range v.world.Facts() {
+		for _, f := range group.Facts {
+			fact, err := fromDatalogFact(v.symbols, f)
+			if err != nil {
+				return nil, nil, err
+			}
+			world.AddFact(group.Origin, fact.convert(symbols))
+		}
+	}
+	for _, r := range v.world.Rules() {
+		rule, err := fromDatalogRule(v.symbols, r.Rule)
+		if err != nil {
+			return nil, nil, err
+		}
+		world.AddRule(r.BlockID, datalog.DefaultTrustedOrigins(), rule.convert(symbols))
+	}
+	return symbols, world, nil
 }
 
 func (v *authorizer) Reset() {
@@ -506,6 +561,7 @@ func (v *authorizer) Reset() {
 	v.checks = []Check{}
 	v.policies = []Policy{}
 	v.scopes = nil
+	v.facts = nil
 	v.rules = nil
 	v.dirty = false
 }

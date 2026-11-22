@@ -87,6 +87,42 @@ func TestAuthorizerGivesTokenSymbolsFirst(t *testing.T) {
 	require.ErrorIs(t, a.Authorize(), datalog.ErrExprDivByZero)
 }
 
+// The world prints a set of strings in the order of the symbol table of an
+// authorizer snapshot of biscuit-rust, from which the worlds of the
+// specification samples come: the policies, then the facts, the rules and
+// the checks of the authorizer, then the blocks of the token. This is not
+// the order that the authorizer evaluates with.
+func TestPrintWorldSnapshotOrder(t *testing.T) {
+	publicRoot, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
+	letters := func(name string) Fact {
+		return Fact{Predicate{Name: name, IDs: []Term{Set{String("a"), String("b"), String("c"), String("d")}}}}
+	}
+
+	builder := NewBuilder(privateRoot)
+	require.NoError(t, builder.AddAuthorityFact(Fact{Predicate{Name: "token", IDs: []Term{String("d")}}}))
+	require.NoError(t, builder.AddAuthorityFact(letters("in_token")))
+	token, err := builder.Build()
+	require.NoError(t, err)
+
+	a, err := token.AuthorizerFrom(RootKey(publicRoot))
+	require.NoError(t, err)
+	a.AddFact(Fact{Predicate{Name: "authorizer", IDs: []Term{String("b")}}})
+	a.AddFact(letters("in_authorizer"))
+	// allow if "c" == "c"
+	a.AddPolicy(Policy{Kind: PolicyKindAllow, Queries: []Rule{{
+		Head:        Predicate{Name: "query"},
+		Expressions: []Expression{{Value{String("c")}, Value{String("c")}, BinaryHeterogeneousEqual}},
+	}}})
+	require.NoError(t, a.Authorize())
+
+	// The policy has "c", the authorizer has "b" then "a", the token "d".
+	world := a.PrintWorld()
+	require.Contains(t, world, `in_token({"c", "b", "a", "d"})`)
+	require.Contains(t, world, `in_authorizer({"c", "b", "a", "d"})`)
+	// The authorizer evaluates with the token first: "d", "a", "b", "c".
+	require.Equal(t, datalog.SymbolTable{"token", "d", "in_token", "a", "b", "c", "authorizer", "in_authorizer"}, *a.(*authorizer).symbols)
+}
+
 func TestVerifierDefaultPolicy(t *testing.T) {
 	rng := rand.Reader
 	publicRoot, privateRoot, _ := ed25519.GenerateKey(rng)
