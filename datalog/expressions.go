@@ -6,6 +6,7 @@ package datalog
 import (
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"regexp"
 	"slices"
@@ -1021,6 +1022,10 @@ func (Div) Eval(left Term, right Term, _ *SymbolTable) (Term, error) {
 
 	if iright == 0 {
 		return nil, ErrExprDivByZero
+	}
+	// The one division that overflows: Go wraps it to MinInt64.
+	if ileft == math.MinInt64 && iright == -1 {
+		return nil, ErrInt64Overflow
 	}
 
 	return Integer(ileft / iright), nil

@@ -1132,6 +1132,13 @@ func TestBinaryDiv(t *testing.T) {
 			expectedErr:     true,
 			expectedErrType: ErrExprDivByZero,
 		},
+		{
+			desc:            "overflow",
+			left:            Integer(math.MinInt64),
+			right:           Integer(-1),
+			expectedErr:     true,
+			expectedErrType: ErrInt64Overflow,
+		},
 	}
 
 	for _, tc := range testCases {
