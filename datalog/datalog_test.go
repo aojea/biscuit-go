@@ -884,6 +884,35 @@ func TestWorldRunLimits(t *testing.T) {
 	}
 }
 
+// The limits on the iterations and on the facts apply to an iteration that
+// generated facts, and the iterations come first, as in biscuit-rust.
+func TestWorldRunLimitsAfterNewFacts(t *testing.T) {
+	syms := &SymbolTable{}
+	p, q := syms.Insert("p"), syms.Insert("q")
+	rule := Rule{Head: Predicate{q, []Term{Variable(0)}}, Body: []Predicate{{p, []Term{Variable(0)}}}}
+	newWorld := func(opts ...WorldOption) *World {
+		w := NewWorld(opts...)
+		w.AddFact(testOrigin, Fact{Predicate{p, []Term{Integer(1)}}})
+		w.AddFact(testOrigin, Fact{Predicate{p, []Term{Integer(2)}}})
+		return w
+	}
+
+	// Nothing to generate: the world is complete.
+	require.NoError(t, newWorld(WithMaxFacts(1), WithMaxIterations(0)).Run(syms))
+
+	w := newWorld(WithMaxFacts(4))
+	w.AddRule(0, testTrusted, rule)
+	require.ErrorIs(t, w.Run(syms), ErrWorldRunLimitMaxFacts)
+
+	w = newWorld(WithMaxFacts(4), WithMaxIterations(1))
+	w.AddRule(0, testTrusted, rule)
+	require.ErrorIs(t, w.Run(syms), ErrWorldRunLimitMaxIterations)
+
+	w = newWorld(WithMaxFacts(5), WithMaxIterations(2))
+	w.AddRule(0, testTrusted, rule)
+	require.NoError(t, w.Run(syms))
+}
+
 func TestWorldRunTimeoutWithoutRules(t *testing.T) {
 	syms := &SymbolTable{}
 	p := syms.Insert("p")

@@ -562,10 +562,14 @@ func (w *World) now() time.Time {
 }
 
 // Run applies the rules until no new fact appears or a limit is reached.
+//
+// The limits on the iterations and on the facts apply to an iteration that
+// generated facts, as in biscuit-rust: a world that is already complete is
+// not an error, however many facts it has.
 func (w *World) Run(syms *SymbolTable) error {
 	deadline := w.now().Add(w.runLimits.maxDuration)
 	budget := &runBudget{now: w.now, deadline: deadline, left: budgetCheckEvery}
-	for i := 0; i < w.runLimits.maxIterations; i++ {
+	for i := 1; ; i++ {
 		// Checked here as well so the limit applies to a world without rules.
 		if w.now().After(deadline) {
 			return ErrWorldRunLimitTimeout
@@ -600,17 +604,18 @@ func (w *World) Run(syms *SymbolTable) error {
 			facts.Insert(nf.fact)
 		}
 
-		newCount := w.factCount()
-		if newCount >= w.runLimits.maxFacts {
-			return ErrWorldRunLimitMaxFacts
-		}
-
 		// last iteration did not generate any new facts, so we can stop here
+		newCount := w.factCount()
 		if newCount == prevCount {
 			return nil
 		}
+		if i >= w.runLimits.maxIterations {
+			return ErrWorldRunLimitMaxIterations
+		}
+		if newCount >= w.runLimits.maxFacts {
+			return ErrWorldRunLimitMaxFacts
+		}
 	}
-	return ErrWorldRunLimitMaxIterations
 }
 
 // Query returns the facts of the trusted origins matching the predicate,

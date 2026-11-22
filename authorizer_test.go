@@ -25,12 +25,17 @@ func TestAuthorizerAppliesOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A limit of one fact is reached by the single authority fact, so Authorize
-	// only fails if the option reached the authorizer's world.
+	// The limits apply when the rules generate facts: with a limit of one
+	// fact, the fact that this rule adds is one too many, so Authorize only
+	// fails if the option reached the authorizer's world.
 	v, err := b.Authorizer(publicRoot, WithWorldOptions(datalog.WithMaxFacts(1)))
 	if err != nil {
 		t.Fatal(err)
 	}
+	v.AddRule(Rule{
+		Head: Predicate{Name: "can", IDs: []Term{Variable("op")}},
+		Body: []Predicate{{Name: "right", IDs: []Term{Variable("op")}}},
+	})
 	v.AddPolicy(DefaultAllowPolicy)
 	if err := v.Authorize(); !errors.Is(err, datalog.ErrWorldRunLimitMaxFacts) {
 		t.Fatalf("Authorize() = %v, want %v", err, datalog.ErrWorldRunLimitMaxFacts)
