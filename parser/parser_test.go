@@ -747,6 +747,37 @@ func TestParseBlockFactWithVariable(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// `!` applies to what comes after it up to the level of `+` and `-`, as in
+// biscuit-rust: the same source gives the same operations.
+func TestParseNegationGroups(t *testing.T) {
+	p := New()
+	value := func(i int64) biscuit.Op { return biscuit.Value{Term: biscuit.Integer(i)} }
+	variable := func(name string) biscuit.Op { return biscuit.Value{Term: biscuit.Variable(name)} }
+	truth := biscuit.Value{Term: biscuit.Bool(true)}
+
+	for source, want := range map[string]biscuit.Expression{
+		// !(1 + 2)
+		`!1 + 2`: {value(1), value(2), biscuit.BinaryAdd, biscuit.UnaryNegate},
+		// !((1 * 2) - 3)
+		`!1 * 2 - 3`: {value(1), value(2), biscuit.BinaryMul, value(3), biscuit.BinarySub, biscuit.UnaryNegate},
+		// 1 * !(2 + 3)
+		`1 * !2 + 3`: {value(1), value(2), value(3), biscuit.BinaryAdd, biscuit.UnaryNegate, biscuit.BinaryMul},
+		// (!$a) == $b, (!$a) & $b
+		`f($a, $b), !$a == $b`: {variable("a"), biscuit.UnaryNegate, variable("b"), biscuit.BinaryHeterogeneousEqual},
+		`f($a, $b), !$a & $b`:  {variable("a"), biscuit.UnaryNegate, variable("b"), biscuit.BinaryBitwiseAnd},
+		// !($a.length())
+		`f($a), !$a.length()`: {variable("a"), biscuit.UnaryLength, biscuit.UnaryNegate},
+		`!!true`:              {truth, biscuit.UnaryNegate, biscuit.UnaryNegate},
+		// the parentheses are an operation of their own
+		`(!1) + 2`: {value(1), biscuit.UnaryNegate, biscuit.UnaryParens, value(2), biscuit.BinaryAdd},
+	} {
+		check, err := p.Check("check if "+source, nil)
+		require.NoError(t, err, source)
+		expressions := check.Queries[0].Expressions
+		require.Equal(t, want, expressions[len(expressions)-1], source)
+	}
+}
+
 func TestParserCheck(t *testing.T) {
 	p := New()
 	for _, testCase := range getCheckTestCases() {

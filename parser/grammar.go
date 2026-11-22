@@ -533,9 +533,12 @@ type OpExpr5 struct {
 	Expr5    *Expr5   `@@`
 }
 
+// Expr5 is the level of `!`. As in biscuit-rust, `!` applies to what comes
+// after it up to the level of `+` and `-`: `!a + b` is `!(a + b)`, and
+// `!a == b` is `(!a) == b`.
 type Expr5 struct {
-	Operator *Operator `@("!")?`
-	Expr6    *Expr6    `@@`
+	Negated *Expr3 `"!" @@`
+	Expr6   *Expr6 `| @@`
 }
 
 type Expr6 struct {
@@ -671,13 +674,14 @@ func (e *Expr4) ToExpr(expr *biscuit.Expression, parameters ParametersMap) error
 }
 
 func (e *Expr5) ToExpr(expr *biscuit.Expression, parameters ParametersMap) error {
-	if err := e.Expr6.ToExpr(expr, parameters); err != nil {
-		return err
-	}
-	if e.Operator != nil {
+	if e.Negated != nil {
+		if err := e.Negated.ToExpr(expr, parameters); err != nil {
+			return err
+		}
 		*expr = append(*expr, biscuit.UnaryNegate)
+		return nil
 	}
-	return nil
+	return e.Expr6.ToExpr(expr, parameters)
 }
 
 func (e *Expr6) ToExpr(expr *biscuit.Expression, parameters ParametersMap) error {
