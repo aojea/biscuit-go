@@ -188,17 +188,24 @@ func (b *Block) symbolTable(token *datalog.SymbolTable) *datalog.SymbolTable {
 		return token
 	}
 	symbols := defaultSymbolTable.Clone()
-	symbols.Extend(b.symbols)
+	appendSymbols(symbols, b.symbols)
 	return symbols
 }
 
+// appendSymbols adds the symbols a block declares to table as they are: a
+// symbol declared twice gets two indexes, as in biscuit-rust. The backing
+// array of table is not written to, the caller may share it.
+func appendSymbols(table, declared *datalog.SymbolTable) {
+	*table = append((*table)[:len(*table):len(*table)], *declared...)
+}
+
 // checkNewSymbols verifies that the block declares only symbols that are
-// new: not a default symbol, not a symbol of table (the symbols of the
-// blocks before it, none for a third-party block), and not one it declares
-// twice. A symbol that is not new is not added again, so the symbols after
-// it would get another index than the one the block refers to.
+// new: not a default symbol and not a symbol of table (the symbols of the
+// blocks before it, none for a third-party block). An implementation that
+// does not add such a symbol again gives the symbols after it another index
+// than one that does, so the block would not mean the same for both.
 func (b *Block) checkNewSymbols(table *datalog.SymbolTable) error {
-	known := make(map[string]struct{}, len(datalog.DEFAULT_SYMBOLS)+table.Len()+b.symbols.Len())
+	known := make(map[string]struct{}, len(datalog.DEFAULT_SYMBOLS)+table.Len())
 	for _, s := range datalog.DEFAULT_SYMBOLS {
 		known[s] = struct{}{}
 	}
@@ -209,7 +216,6 @@ func (b *Block) checkNewSymbols(table *datalog.SymbolTable) error {
 		if _, ok := known[s]; ok {
 			return fmt.Errorf("%w: %q", ErrSymbolTableOverlap, s)
 		}
-		known[s] = struct{}{}
 	}
 	return nil
 }

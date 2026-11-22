@@ -215,7 +215,7 @@ func (u *Unmarshaler) Unmarshal(serialized []byte) (*Biscuit, error) {
 	if err := authority.checkNewSymbols(symbols); err != nil {
 		return nil, err
 	}
-	symbols.Extend(authority.symbols)
+	appendSymbols(symbols, authority.symbols)
 	if err := authority.checkSymbols(symbols); err != nil {
 		return nil, err
 	}
@@ -248,7 +248,7 @@ func (u *Unmarshaler) Unmarshal(serialized []byte) (*Biscuit, error) {
 			if err := block.checkNewSymbols(symbols); err != nil {
 				return nil, err
 			}
-			symbols.Extend(block.symbols)
+			appendSymbols(symbols, block.symbols)
 			if err := block.checkSymbols(symbols); err != nil {
 				return nil, err
 			}

@@ -314,7 +314,7 @@ func TestUnmarshalRejectsSymbolTableOverlap(t *testing.T) {
 	block := token.CreateBlock()
 	require.NoError(t, block.AddCheck(Check{Queries: []Rule{{
 		Head: Predicate{Name: "query"},
-		Body: []Predicate{{Name: "resource", IDs: []Term{String("file2")}}},
+		Body: []Predicate{{Name: "resource", IDs: []Term{String("file2"), String("file3")}}},
 	}}}))
 	token, err = token.Append(rand.Reader, block.Build())
 	require.NoError(t, err)
@@ -329,18 +329,19 @@ func TestUnmarshalRejectsSymbolTableOverlap(t *testing.T) {
 	token, err = token.AppendThirdPartyBlock(nil, thirdPartyPublic, contents)
 	require.NoError(t, err)
 
-	unmarshal := func(edit func(*pb.Biscuit)) error {
+	unmarshal := func(edit func(*pb.Biscuit)) (*Biscuit, error) {
 		container := proto.Clone(token.container).(*pb.Biscuit)
 		edit(container)
 		serialized, err := proto.Marshal(container)
 		require.NoError(t, err)
-		_, err = Unmarshal(serialized)
-		return err
+		return Unmarshal(serialized)
 	}
-	require.NoError(t, unmarshal(func(*pb.Biscuit) {}))
+	_, err = unmarshal(func(*pb.Biscuit) {})
+	require.NoError(t, err)
 
-	// The check of block 1 refers to symbol 1025, "file2". In each case the
-	// table would still have a symbol at that index, but not that one.
+	// The check of block 1 refers to the symbols 1025 and 1026, "file2" and
+	// "file3". In each case the table would still have a symbol at 1025, but
+	// not that one.
 	testCases := []struct {
 		desc    string
 		block   func(*pb.Biscuit) *pb.SignedBlock
@@ -366,12 +367,6 @@ func TestUnmarshalRejectsSymbolTableOverlap(t *testing.T) {
 			overlap: "read",
 		},
 		{
-			desc:    "symbol declared twice",
-			block:   func(c *pb.Biscuit) *pb.SignedBlock { return c.Blocks[0] },
-			symbols: []string{"other", "other"},
-			overlap: "other",
-		},
-		{
 			desc:    "default symbol in a third-party block",
 			block:   func(c *pb.Biscuit) *pb.SignedBlock { return c.Blocks[1] },
 			symbols: []string{"group", "staff"},
@@ -380,7 +375,7 @@ func TestUnmarshalRejectsSymbolTableOverlap(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
-			err := unmarshal(func(c *pb.Biscuit) {
+			_, err := unmarshal(func(c *pb.Biscuit) {
 				editSignedBlock(t, tc.block(c), func(b *pb.Block) { b.Symbols = tc.symbols })
 			})
 			require.ErrorIs(t, err, ErrSymbolTableOverlap)
@@ -388,10 +383,19 @@ func TestUnmarshalRejectsSymbolTableOverlap(t *testing.T) {
 		})
 	}
 
+	// A symbol that one block declares twice gets two indexes, as in
+	// biscuit-rust: the symbols after it keep the index the block refers to.
+	twice, err := unmarshal(func(c *pb.Biscuit) {
+		editSignedBlock(t, c.Blocks[0], func(b *pb.Block) { b.Symbols = []string{"other", "other"} })
+	})
+	require.NoError(t, err)
+	require.Contains(t, twice.Code()[0], `resource("other", "other")`)
+
 	// A third-party block has its own table: it may declare a symbol of the token.
-	require.NoError(t, unmarshal(func(c *pb.Biscuit) {
+	_, err = unmarshal(func(c *pb.Biscuit) {
 		editSignedBlock(t, c.Blocks[1], func(b *pb.Block) { b.Symbols = []string{"file1"} })
-	}))
+	})
+	require.NoError(t, err)
 }
 
 // Unmarshal refuses the signed blocks the spec rules out. It does not verify
