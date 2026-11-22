@@ -42,6 +42,51 @@ func TestAuthorizerAppliesOptions(t *testing.T) {
 	}
 }
 
+// The strings of the token get their symbols in the table of the authorizer
+// before the strings of the authorizer, as in biscuit-rust: the facts, the
+// rules, then the checks of each block. A set of strings has the order of
+// the symbols, so this order decides the element that .any() sees first.
+func TestAuthorizerGivesTokenSymbolsFirst(t *testing.T) {
+	publicRoot, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
+
+	builder := NewBuilder(privateRoot)
+	require.NoError(t, builder.AddAuthorityFact(Fact{Predicate{Name: "token", IDs: []Term{String("b")}}}))
+	// check if token($x), $x != "c"
+	require.NoError(t, builder.AddAuthorityCheck(Check{Queries: []Rule{{
+		Head:        Predicate{Name: "query"},
+		Body:        []Predicate{{Name: "token", IDs: []Term{Variable("x")}}},
+		Expressions: []Expression{{Value{Variable("x")}, Value{String("c")}, BinaryHeterogeneousNotEqual}},
+	}}}))
+	token, err := builder.Build()
+	require.NoError(t, err)
+
+	a, err := token.AuthorizerFrom(RootKey(publicRoot))
+	require.NoError(t, err)
+	a.AddFact(Fact{Predicate{Name: "letters", IDs: []Term{Set{String("a"), String("b"), String("c")}}}})
+	a.AddPolicy(DefaultAllowPolicy)
+	require.NoError(t, a.Authorize())
+	require.Equal(t, datalog.SymbolTable{"token", "b", "x", "c", "letters", "a", "allow"}, *a.(*authorizer).symbols)
+
+	// check if {"a", "b"}.any($p -> $p == "a" || 1 / 0 == 1): "b" comes
+	// first, and the division fails before "a" is seen.
+	a, err = token.AuthorizerFrom(RootKey(publicRoot))
+	require.NoError(t, err)
+	a.AddCheck(Check{Queries: []Rule{{
+		Head: Predicate{Name: "query"},
+		Expressions: []Expression{{
+			Value{Set{String("a"), String("b")}},
+			Closure{Params: []Variable{"p"}, Body: Expression{
+				Value{Variable("p")}, Value{String("a")}, BinaryHeterogeneousEqual,
+				Closure{Body: Expression{Value{Integer(1)}, Value{Integer(0)}, BinaryDiv, Value{Integer(1)}, BinaryHeterogeneousEqual}},
+				BinaryLazyOr,
+			}},
+			BinaryAny,
+		}},
+	}}})
+	a.AddPolicy(DefaultAllowPolicy)
+	require.ErrorIs(t, a.Authorize(), datalog.ErrExprDivByZero)
+}
+
 func TestVerifierDefaultPolicy(t *testing.T) {
 	rng := rand.Reader
 	publicRoot, privateRoot, _ := ed25519.GenerateKey(rng)

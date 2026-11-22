@@ -139,11 +139,41 @@ func NewVerifier(b *Biscuit, opts ...AuthorizerOption) (Authorizer, error) {
 			a.blocksByKey[key] = append(a.blocksByKey[key], datalog.BlockID(i+1))
 		}
 	}
+	a.internTokenSymbols()
 
 	a.world = a.baseWorld.Clone()
 	a.symbols = a.baseSymbols.Clone()
 
 	return a, nil
+}
+
+// internTokenSymbols gives the strings of the token their symbols in the
+// table of the authorizer, before the content of the authorizer gets its
+// own: block by block, the facts, the rules, then the checks. biscuit-rust
+// loads a token in this order. The order of the symbols is the order of a
+// set of strings: it decides how the set prints, and which element .any()
+// and .all() see first.
+//
+// A term that does not convert is ignored here: Authorize reports it.
+func (v *authorizer) internTokenSymbols() {
+	for _, block := range append([]*Block{v.biscuit.authority}, v.biscuit.blocks...) {
+		symbols := block.symbolTable(v.biscuit.symbols)
+		for _, fact := range *block.facts {
+			if f, err := fromDatalogFact(symbols, fact); err == nil {
+				f.convert(v.baseSymbols)
+			}
+		}
+		for _, rule := range block.rules {
+			if r, err := fromDatalogRule(symbols, rule); err == nil {
+				r.convert(v.baseSymbols)
+			}
+		}
+		for _, check := range block.checks {
+			if c, err := fromDatalogCheck(symbols, check); err == nil {
+				c.convert(v.baseSymbols)
+			}
+		}
+	}
 }
 
 func (v *authorizer) AddAuthorizer(a ParsedAuthorizer) {
