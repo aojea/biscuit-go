@@ -18,6 +18,9 @@ var (
 	// ErrUnboundVariable is returned for a rule that has a variable, in its
 	// head or in an expression, that no predicate of its body binds.
 	ErrUnboundVariable = errors.New("parser: the rule contains variables that are not bound by predicates in the rule's body")
+	// ErrNestingTooDeep is returned for a source with more levels of
+	// parentheses, brackets, braces and `!` than the parser accepts.
+	ErrNestingTooDeep = errors.New("parser: the source is nested too deep")
 )
 
 // Rules are tried in order and the first match wins. Word-like rules need \b
@@ -117,8 +120,64 @@ func New() Parser {
 	}
 }
 
+// maxNesting is the deepest nesting that the parser accepts in a source.
+// The parser calls itself for each level, and each level needs some
+// kilobytes of stack: without a limit, a source of 50 kB of `(` needs a
+// gigabyte of memory, and a longer one stops the process with a stack
+// overflow, which is not a panic that the caller can recover.
+const maxNesting = 256
+
+// checkNesting returns ErrNestingTooDeep for a source that the parser
+// cannot read in a bounded stack. The levels are the parentheses, brackets
+// and braces that are open, plus the `!` operators of the statement, each
+// of which can hold the expression after it.
+func checkNesting(source string) error {
+	open, negations := 0, 0
+	for i := 0; i < len(source); i++ {
+		switch source[i] {
+		case '"':
+			for i++; i < len(source) && source[i] != '"'; i++ {
+				if source[i] == '\\' {
+					i++
+				}
+			}
+		case '/':
+			if i+1 < len(source) && source[i+1] == '/' {
+				for i < len(source) && source[i] != '\n' {
+					i++
+				}
+			}
+		case '(', '[', '{':
+			open++
+		case ')', ']', '}':
+			if open > 0 {
+				open--
+			}
+		case ';':
+			negations = 0
+		case '!':
+			if i+1 < len(source) && source[i+1] == '=' {
+				continue
+			}
+			negations++
+		}
+		if open+negations > maxNesting {
+			return ErrNestingTooDeep
+		}
+	}
+	return nil
+}
+
+// parse reads a source with one of the parsers of the grammar.
+func parse[T any](parser *participle.Parser[T], name string, source string) (*T, error) {
+	if err := checkNesting(source); err != nil {
+		return nil, err
+	}
+	return parser.ParseString(name, source)
+}
+
 func (p *parser) Fact(fact string, parameters ParametersMap) (biscuit.Fact, error) {
-	parsed, err := p.factParser.ParseString("fact", fact)
+	parsed, err := parse(p.factParser, "fact", fact)
 	if err != nil {
 		return biscuit.Fact{}, err
 	}
@@ -127,7 +186,7 @@ func (p *parser) Fact(fact string, parameters ParametersMap) (biscuit.Fact, erro
 }
 
 func (p *parser) Rule(rule string, parameters ParametersMap) (biscuit.Rule, error) {
-	parsed, err := p.ruleParser.ParseString("rule", rule)
+	parsed, err := parse(p.ruleParser, "rule", rule)
 	if err != nil {
 		return biscuit.Rule{}, err
 	}
@@ -141,7 +200,7 @@ func (p *parser) Rule(rule string, parameters ParametersMap) (biscuit.Rule, erro
 }
 
 func (p *parser) Check(check string, parameters ParametersMap) (biscuit.Check, error) {
-	parsed, err := p.checkParser.ParseString("check", check)
+	parsed, err := parse(p.checkParser, "check", check)
 	if err != nil {
 		return biscuit.Check{}, err
 	}
@@ -155,7 +214,7 @@ func (p *parser) Check(check string, parameters ParametersMap) (biscuit.Check, e
 }
 
 func (p *parser) Policy(policy string, parameters ParametersMap) (biscuit.Policy, error) {
-	parsed, err := p.policyParser.ParseString("policy", policy)
+	parsed, err := parse(p.policyParser, "policy", policy)
 	if err != nil {
 		return biscuit.Policy{}, err
 	}
@@ -194,7 +253,7 @@ func (p *parser) Policy(policy string, parameters ParametersMap) (biscuit.Policy
 }
 
 func (p *parser) Block(block string, parameters ParametersMap) (biscuit.ParsedBlock, error) {
-	parsed, err := p.blockParser.ParseString("block", block)
+	parsed, err := parse(p.blockParser, "block", block)
 	if err != nil {
 		return biscuit.ParsedBlock{}, err
 	}
@@ -207,7 +266,7 @@ func (p *parser) Block(block string, parameters ParametersMap) (biscuit.ParsedBl
 }
 
 func (p *parser) Authorizer(authorizer string, parameters ParametersMap) (biscuit.ParsedAuthorizer, error) {
-	parsed, err := p.authorizerParser.ParseString("authorizer", authorizer)
+	parsed, err := parse(p.authorizerParser, "authorizer", authorizer)
 	if err != nil {
 		return biscuit.ParsedAuthorizer{}, err
 	}

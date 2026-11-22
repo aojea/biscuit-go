@@ -5,6 +5,7 @@ package parser
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -775,6 +776,42 @@ func TestParseNegationGroups(t *testing.T) {
 		require.NoError(t, err, source)
 		expressions := check.Queries[0].Expressions
 		require.Equal(t, want, expressions[len(expressions)-1], source)
+	}
+}
+
+// The parser calls itself for each level of nesting. A source that is
+// nested too deep is refused before the parser reads it: without the limit
+// it stops the process with a stack overflow, which no caller can recover.
+func TestParseNestingLimit(t *testing.T) {
+	p := New()
+	deep := 100000
+	for name, source := range map[string]string{
+		"parentheses": "check if " + strings.Repeat("(", deep),
+		"negations":   "check if " + strings.Repeat("!", deep) + "true",
+		"arrays":      "check if f(" + strings.Repeat("[", deep),
+		"braces":      "check if f(" + strings.Repeat("{", deep),
+		"mixed":       "check if " + strings.Repeat("!(", deep),
+		"sum":         "check if " + strings.Repeat("!1 + ", deep) + "1",
+	} {
+		_, err := p.Check(source, nil)
+		require.ErrorIs(t, err, ErrNestingTooDeep, name)
+		_, err = p.Block(source+";", nil)
+		require.ErrorIs(t, err, ErrNestingTooDeep, name)
+		_, err = p.Authorizer(source+";", nil)
+		require.ErrorIs(t, err, ErrNestingTooDeep, name)
+	}
+
+	// Under the limit, and what is not nesting: a string, a comment, and
+	// the statements of a block, each with its own `!`.
+	for name, source := range map[string]string{
+		"parentheses": "check if " + strings.Repeat("(", 200) + "true" + strings.Repeat(")", 200) + ";",
+		"negations":   "check if " + strings.Repeat("!", 200) + "true;",
+		"string":      `f("` + strings.Repeat("(!", deep) + `");`,
+		"comment":     "// " + strings.Repeat("(!", deep) + "\nf(1);",
+		"statements":  strings.Repeat("check if !false;\n", 1000),
+	} {
+		_, err := p.Block(source, nil)
+		require.NoError(t, err, name)
 	}
 }
 
