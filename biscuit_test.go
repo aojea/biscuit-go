@@ -420,6 +420,67 @@ func TestBiscuitRejectIf(t *testing.T) {
 	require.ErrorContains(t, authorize(true), "reject if")
 }
 
+// `reject if a or b` fails when one of its queries has a match, as the
+// specification says: the queries of the other kinds of check are
+// alternatives, those of `reject if` are not.
+func TestBiscuitRejectIfSeveralQueries(t *testing.T) {
+	publicRoot, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
+	query := func(name string) Rule {
+		return Rule{Head: Predicate{Name: "query"}, Body: []Predicate{{Name: name, IDs: []Term{Integer(1)}}}}
+	}
+	reject := Check{Kind: CheckKindReject, Queries: []Rule{query("revoked"), query("expired")}}
+
+	builder := NewBuilder(privateRoot)
+	require.NoError(t, builder.AddAuthorityCheck(reject))
+	b, err := builder.Build()
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		facts  []string
+		passes bool
+	}{
+		{nil, true},
+		{[]string{"revoked"}, false},
+		{[]string{"expired"}, false},
+		{[]string{"revoked", "expired"}, false},
+	} {
+		// The check of the token, then the same check in the authorizer.
+		for _, inAuthorizer := range []bool{false, true} {
+			token := b
+			if inAuthorizer {
+				token, err = NewBuilder(privateRoot).Build()
+				require.NoError(t, err)
+			}
+			ab, err := token.AuthorizerFrom(RootKey(publicRoot))
+			require.NoError(t, err)
+			if inAuthorizer {
+				ab.AddCheck(reject)
+			}
+			for _, name := range tc.facts {
+				ab.AddFact(Fact{Predicate{Name: name, IDs: []Term{Integer(1)}}})
+			}
+			ab.AddPolicy(DefaultAllowPolicy)
+			err = ab.Authorize()
+			if tc.passes {
+				require.NoError(t, err, "facts %v", tc.facts)
+			} else {
+				require.ErrorContains(t, err, "reject if", "facts %v", tc.facts)
+			}
+		}
+	}
+
+	// A check without queries fails, whatever its kind.
+	empty, err := NewBuilder(privateRoot).Build()
+	require.NoError(t, err)
+	for _, kind := range []CheckKind{CheckKindOne, CheckKindAll, CheckKindReject} {
+		ab, err := empty.AuthorizerFrom(RootKey(publicRoot))
+		require.NoError(t, err)
+		ab.AddCheck(Check{Kind: kind})
+		ab.AddPolicy(DefaultAllowPolicy)
+		require.ErrorContains(t, ab.Authorize(), "failed to verify check", "kind %d", kind)
+	}
+}
+
 // null round-trips through a token, equals only itself under ==, and makes
 // the block v6.
 func TestBiscuitNull(t *testing.T) {

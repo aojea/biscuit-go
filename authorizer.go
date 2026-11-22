@@ -362,8 +362,9 @@ func (v *authorizer) Authorize() error {
 	}
 }
 
-// checkPasses evaluates the queries of a check from block blockID: a check
-// passes when one of its queries does, under the semantics of its kind. Each
+// checkPasses evaluates the queries of a check from block blockID. `check
+// if` and `check all` pass when one of their queries does. `reject if`
+// fails when one of its queries has a match: it passes when none has. Each
 // query reads the facts of its own scopes, or of defaults.
 func (v *authorizer) checkPasses(c datalog.Check, blockID datalog.BlockID, defaults datalog.TrustedOrigins) (bool, error) {
 	for _, query := range c.Queries {
@@ -382,8 +383,8 @@ func (v *authorizer) checkPasses(c datalog.Check, blockID datalog.BlockID, defau
 			if err != nil {
 				return false, err
 			}
-			if len(*res) == 0 {
-				return true, nil
+			if len(*res) != 0 {
+				return false, nil
 			}
 		default:
 			res, err := v.world.QueryRule(query, blockID, trusted, v.symbols)
@@ -395,7 +396,8 @@ func (v *authorizer) checkPasses(c datalog.Check, blockID datalog.BlockID, defau
 			}
 		}
 	}
-	return false, nil
+	// A check without queries fails, whatever its kind.
+	return c.Kind == datalog.CheckKindReject && len(c.Queries) > 0, nil
 }
 
 func (v *authorizer) Query(rule Rule) (FactSet, error) {
