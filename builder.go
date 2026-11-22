@@ -20,6 +20,10 @@ import (
 )
 
 var (
+	// ErrDuplicateFact is no longer returned: a block can have the same
+	// fact more than once, as in biscuit-rust.
+	//
+	// Deprecated: the builders do not return this error.
 	ErrDuplicateFact     = errors.New("biscuit: fact already exists")
 	ErrInvalidBlockIndex = errors.New("biscuit: invalid block index")
 )
@@ -126,11 +130,7 @@ func (b *builderOptions) AddBlock(block ParsedBlock) error {
 }
 
 func (b *builderOptions) AddAuthorityFact(fact Fact) error {
-	dlFact := fact.convert(b.symbols)
-	if !b.facts.Insert(dlFact) {
-		return ErrDuplicateFact
-	}
-
+	*b.facts = append(*b.facts, fact.convert(b.symbols))
 	return nil
 }
 
@@ -343,11 +343,7 @@ func (b *blockBuilder) AddBlock(block ParsedBlock) error {
 }
 
 func (b *blockBuilder) AddFact(fact Fact) error {
-	dlFact := fact.convert(b.symbols)
-	if !b.facts.Insert(dlFact) {
-		return ErrDuplicateFact
-	}
-
+	*b.facts = append(*b.facts, fact.convert(b.symbols))
 	return nil
 }
 

@@ -197,9 +197,12 @@ var defaultSymbolTable = &datalog.SymbolTable{}
 
 type Block struct {
 	symbols *datalog.SymbolTable
-	facts   *datalog.FactSet
-	rules   []datalog.Rule
-	checks  []datalog.Check
+	// facts are the facts of the block as the block has them, in order. A
+	// fact can be there more than once: the type is used as a list, and
+	// FactSet.Insert, which keeps each fact once, is not used on it.
+	facts  *datalog.FactSet
+	rules  []datalog.Rule
+	checks []datalog.Check
 	// scopes is the block-level `trusting` clause, the default scope of
 	// the rules and checks of the block.
 	scopes []datalog.Scope

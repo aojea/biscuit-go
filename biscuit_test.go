@@ -444,6 +444,37 @@ func TestAuthorizeStopsAtFirstMatch(t *testing.T) {
 	}))
 }
 
+// A block can have the same fact more than once: the builders keep it, as
+// those of biscuit-rust do, so that the same source gives the same block.
+func TestBuilderKeepsDuplicateFact(t *testing.T) {
+	publicRoot, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
+	fact := Fact{Predicate{Name: "right", IDs: []Term{String("read")}}}
+
+	builder := NewBuilder(privateRoot)
+	require.NoError(t, builder.AddAuthorityFact(fact))
+	require.NoError(t, builder.AddAuthorityFact(fact))
+	token, err := builder.Build()
+	require.NoError(t, err)
+
+	block := token.CreateBlock()
+	require.NoError(t, block.AddFact(fact))
+	require.NoError(t, block.AddFact(fact))
+	token, err = token.Append(rand.Reader, block.Build())
+	require.NoError(t, err)
+
+	serialized, err := token.Serialize()
+	require.NoError(t, err)
+	token, err = Unmarshal(serialized)
+	require.NoError(t, err)
+	require.Len(t, *token.authority.facts, 2)
+	require.Len(t, *token.blocks[0].facts, 2)
+
+	a, err := token.AuthorizerFrom(RootKey(publicRoot))
+	require.NoError(t, err)
+	a.AddPolicy(DefaultAllowPolicy)
+	require.NoError(t, a.Authorize())
+}
+
 // A rule whose head has a variable that its body does not bind cannot
 // generate a fact. The builders refuse it, and the authorizer refuses a
 // token that has one, also when the rule matches nothing, as biscuit-rust
