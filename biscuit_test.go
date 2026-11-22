@@ -442,6 +442,16 @@ func TestAuthorizeStopsAtFirstMatch(t *testing.T) {
 	require.NoError(t, authorize([]int64{1, 0}, func(a Authorizer) {
 		a.AddPolicy(Policy{Kind: PolicyKindAllow, Queries: query})
 	}))
+
+	// A query whose head has a variable that the body does not bind has no
+	// match, as in biscuit-rust. Only a token that no builder made has one.
+	unbound := []Rule{{
+		Head: Predicate{Name: "query", IDs: []Term{Variable("y")}},
+		Body: []Predicate{{Name: "value", IDs: []Term{Variable("x")}}},
+	}}
+	require.ErrorContains(t, authorize([]int64{1}, func(a Authorizer) { a.AddCheck(Check{Queries: unbound}) }), "check if")
+	require.NoError(t, authorize([]int64{1}, func(a Authorizer) { a.AddCheck(Check{Kind: CheckKindReject, Queries: unbound}) }))
+	require.NoError(t, authorize([]int64{1}, func(a Authorizer) { a.AddPolicy(Policy{Kind: PolicyKindDeny, Queries: unbound}) }))
 }
 
 // A block can have the same fact more than once: the builders keep it, as

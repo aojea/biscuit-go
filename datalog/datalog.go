@@ -680,14 +680,20 @@ func (w *World) QueryRule(rule Rule, blockID BlockID, trusted TrustedOrigins, sy
 // the first match, as the specification asks for the queries of a check or
 // a policy: the facts after it are not read, so an expression that would
 // fail on one of them does not.
+//
+// A rule whose head has a variable that the body does not bind has no
+// match, as in biscuit-rust, where a binding that cannot make the head is
+// dropped. Its expressions are evaluated all the same. Only a token that is
+// not made by a builder has a query with such a head.
 func (w *World) QueryMatch(rule Rule, trusted TrustedOrigins, syms *SymbolTable) (bool, error) {
+	headBound := rule.Validate() == nil
 	found := false
 	err := combine(rule.variables(), rule.Body, w.visibleFacts(trusted), nil, func(res match) (bool, error) {
 		ok, err := holds(rule.Expressions, res.vars, syms, w.externs)
 		if err != nil {
 			return false, err
 		}
-		found = ok
+		found = ok && headBound
 		return !found, nil
 	})
 	if err != nil {

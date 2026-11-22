@@ -731,6 +731,37 @@ func TestWorldQueryStopsAtFirstMatch(t *testing.T) {
 	require.Len(t, *facts, 2)
 }
 
+// A query whose head has a variable that the body does not bind has no
+// match, as in biscuit-rust: a binding that cannot make the head is dropped.
+// `check all` does not use the head. Only a token that no builder made has
+// such a query.
+func TestWorldQueryMatchUnboundHead(t *testing.T) {
+	syms := &SymbolTable{}
+	value, query := syms.Insert("value"), syms.Insert("query")
+	w := NewWorld()
+	w.AddFact(testOrigin, Fact{Predicate{value, []Term{Integer(1)}}})
+	body := []Predicate{{value, []Term{Variable(0)}}}
+	bound := Rule{Head: Predicate{query, []Term{Variable(0)}}, Body: body}
+	unbound := Rule{Head: Predicate{query, []Term{Variable(1)}}, Body: body}
+
+	matched, err := w.QueryMatch(bound, testTrusted, syms)
+	require.NoError(t, err)
+	require.True(t, matched)
+	matched, err = w.QueryMatch(unbound, testTrusted, syms)
+	require.NoError(t, err)
+	require.False(t, matched)
+	all, err := w.QueryMatchAll(unbound, testTrusted, syms)
+	require.NoError(t, err)
+	require.True(t, all)
+
+	// The expressions are evaluated all the same.
+	unbound.Expressions = []Expression{{
+		Value{Integer(1)}, Value{Integer(0)}, BinaryOp{Div{}}, Value{Integer(1)}, BinaryOp{Equal{}},
+	}}
+	_, err = w.QueryMatch(unbound, testTrusted, syms)
+	require.ErrorIs(t, err, ErrExprDivByZero)
+}
+
 // A string that an expression makes gets a symbol for one binding only: the
 // table of the world does not grow, and the string does not change the order
 // of a set of strings that is read later.
