@@ -196,14 +196,19 @@ func (p Predicate) Equal(p2 Predicate) bool {
 	return true
 }
 
+// Match reports whether the predicate of a fact matches p2, the predicate of
+// a rule body: a variable of p2 matches every term, the other terms must be
+// equal. A fact does not contain variables; one that does matches nothing,
+// as in biscuit-rust, so that it cannot stand for every value.
 func (p Predicate) Match(p2 Predicate) bool {
 	if p.Name != p2.Name || len(p.Terms) != len(p2.Terms) {
 		return false
 	}
 	for i, id := range p.Terms {
-		_, v1 := id.(Variable)
-		_, v2 := p2.Terms[i].(Variable)
-		if v1 || v2 {
+		if _, ok := id.(Variable); ok {
+			return false
+		}
+		if _, ok := p2.Terms[i].(Variable); ok {
 			continue
 		}
 		if !id.Equal(p2.Terms[i]) {

@@ -691,6 +691,34 @@ func TestWorldQueryBytesAndSetTerms(t *testing.T) {
 	require.Len(t, *res, 2)
 }
 
+// A fact has no variables. One that has a variable, which only a token that
+// was not made by a builder can carry, matches no predicate: it does not
+// stand for every value.
+func TestFactWithVariableMatchesNothing(t *testing.T) {
+	w := NewWorld()
+	syms := &SymbolTable{}
+	approved := syms.Insert("approved")
+	file := syms.Insert("file1")
+
+	w.AddFact(testOrigin, Fact{Predicate{approved, []Term{Variable(1), Variable(2)}}})
+
+	for _, body := range []Predicate{
+		{approved, []Term{file, Integer(42)}},
+		{approved, []Term{Variable(3), Integer(42)}},
+		{approved, []Term{Variable(3), Variable(4)}},
+	} {
+		res, err := w.QueryRule(Rule{Head: Predicate{Name: syms.Insert("query")}, Body: []Predicate{body}}, 0, testTrusted, syms)
+		require.NoError(t, err)
+		require.Empty(t, *res)
+	}
+
+	// A fact without variables still matches.
+	w.AddFact(testOrigin, Fact{Predicate{approved, []Term{file, Integer(42)}}})
+	res, err := w.QueryRule(Rule{Head: Predicate{Name: syms.Insert("query")}, Body: []Predicate{{approved, []Term{Variable(3), Integer(42)}}}}, 0, testTrusted, syms)
+	require.NoError(t, err)
+	require.Len(t, *res, 1)
+}
+
 func TestWorldRunLimits(t *testing.T) {
 	syms := &SymbolTable{}
 	a := syms.Insert("A")
