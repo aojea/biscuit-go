@@ -134,6 +134,11 @@ func protoBlockToTokenBlock(input *pb.Block, keys publicKeyTable) (*Block, error
 		}
 
 		for i, pbCheck := range input.Checks {
+			// The kind of a check is a field of datalog v3.1. A v3.0 block
+			// that has it, also with the default kind, is not valid.
+			if pbCheck.Kind != nil && input.GetVersion() < blockVersion3_1 {
+				return nil, errBlockVersion(input.GetVersion(), blockVersion3_1)
+			}
 			c, err := protoCheckToTokenCheckV2(pbCheck, keys)
 			if err != nil {
 				return nil, err
@@ -145,11 +150,7 @@ func protoBlockToTokenBlock(input *pb.Block, keys publicKeyTable) (*Block, error
 	}
 
 	if required := readableVersion(facts, scopes, rules, checks); input.GetVersion() < required {
-		return nil, fmt.Errorf(
-			"biscuit: failed to convert proto block to token block: block version %d uses features of version %d",
-			input.GetVersion(),
-			required,
-		)
+		return nil, errBlockVersion(input.GetVersion(), required)
 	}
 
 	return &Block{
@@ -162,6 +163,16 @@ func protoBlockToTokenBlock(input *pb.Block, keys publicKeyTable) (*Block, error
 		context:    input.GetContext(),
 		version:    input.GetVersion(),
 	}, nil
+}
+
+// errBlockVersion reports a block that declares a version lower than the
+// version that its content needs.
+func errBlockVersion(declared, needed uint32) error {
+	return fmt.Errorf(
+		"biscuit: failed to convert proto block to token block: block version %d uses features of version %d",
+		declared,
+		needed,
+	)
 }
 
 /*func tokenSignatureToProtoSignature(ts *sig.TokenSignature) *pb.Signature {

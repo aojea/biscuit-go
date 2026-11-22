@@ -868,3 +868,52 @@ func TestUnmarshalRejectsMissingRequiredFields(t *testing.T) {
 		})
 	}
 }
+
+// biscuit-rust refuses these blocks: a block of version 3 where a check has
+// a kind, also the default one, and a regular operation that has the name
+// of an extern function.
+func TestBlockConvertRefusedByRust(t *testing.T) {
+	block := func(version uint32, kind *pb.Check_Kind, ops ...*pb.Op) *pb.Block {
+		return &pb.Block{
+			Version: proto.Uint32(version),
+			Symbols: []string{"name"},
+			Checks: []*pb.Check{{
+				Kind: kind,
+				Queries: []*pb.Rule{{
+					Head:        &pb.Predicate{Name: proto.Uint64(0)},
+					Expressions: []*pb.Expression{{Ops: ops}},
+				}},
+			}},
+		}
+	}
+	value := &pb.Op{Content: &pb.Op_Value{Value: &pb.Term{Content: &pb.Term_Bool{Bool: true}}}}
+	name := proto.Uint64(uint64(datalog.OFFSET))
+	unary := func(kind pb.OpUnary_Kind, ffi *uint64) *pb.Op {
+		return &pb.Op{Content: &pb.Op_Unary{Unary: &pb.OpUnary{Kind: kind.Enum(), FfiName: ffi}}}
+	}
+	binary := func(kind pb.OpBinary_Kind, ffi *uint64) *pb.Op {
+		return &pb.Op{Content: &pb.Op_Binary{Binary: &pb.OpBinary{Kind: kind.Enum(), FfiName: ffi}}}
+	}
+
+	for desc, tc := range map[string]struct {
+		block *pb.Block
+		valid bool
+	}{
+		"v3 without a check kind":          {block(3, nil, value), true},
+		"v3 with the default check kind":   {block(3, pb.Check_One.Enum(), value), false},
+		"v4 with the default check kind":   {block(4, pb.Check_One.Enum(), value), true},
+		"negate":                           {block(6, nil, value, unary(pb.OpUnary_Negate, nil)), true},
+		"negate with an extern name":       {block(6, nil, value, unary(pb.OpUnary_Negate, name)), false},
+		"unary extern function":            {block(6, nil, value, unary(pb.OpUnary_Ffi, name)), true},
+		"strict equal":                     {block(6, nil, value, value, binary(pb.OpBinary_Equal, nil)), true},
+		"strict equal with an extern name": {block(6, nil, value, value, binary(pb.OpBinary_Equal, name)), false},
+		"binary extern function":           {block(6, nil, value, value, binary(pb.OpBinary_Ffi, name)), true},
+	} {
+		_, err := protoBlockToTokenBlock(tc.block, nil)
+		if tc.valid {
+			require.NoError(t, err, desc)
+		} else {
+			require.Error(t, err, desc)
+		}
+	}
+}

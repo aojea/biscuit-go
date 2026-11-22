@@ -452,6 +452,9 @@ func protoExprUnaryToTokenExprUnary(op *pb.OpUnary) (datalog.UnaryOpFunc, error)
 	if op == nil || op.Kind == nil {
 		return nil, errors.New("biscuit: proto OpUnary without a kind")
 	}
+	if op.FfiName != nil && *op.Kind != pb.OpUnary_Ffi {
+		return nil, errors.New("biscuit: proto OpUnary with an extern function name on a regular operation")
+	}
 	var unaryOp datalog.UnaryOpFunc
 	switch *op.Kind {
 	case pb.OpUnary_Negate:
@@ -547,6 +550,9 @@ func tokenExprBinaryToProtoExprBinary(op datalog.BinaryOp) (*pb.OpBinary, error)
 func protoExprBinaryToTokenExprBinary(op *pb.OpBinary) (datalog.BinaryOpFunc, error) {
 	if op == nil || op.Kind == nil {
 		return nil, errors.New("biscuit: proto OpBinary without a kind")
+	}
+	if op.FfiName != nil && *op.Kind != pb.OpBinary_Ffi {
+		return nil, errors.New("biscuit: proto OpBinary with an extern function name on a regular operation")
 	}
 	var binaryOp datalog.BinaryOpFunc
 	switch *op.Kind {
