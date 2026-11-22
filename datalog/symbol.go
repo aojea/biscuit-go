@@ -120,8 +120,10 @@ func (t *SymbolTable) Var(v Variable) string {
 	return (*t)[int(v)-1024]
 }
 
+// Clone returns a table that does not share memory with the receiver: a
+// symbol added to one is never visible in the other, or in another clone.
 func (t *SymbolTable) Clone() *SymbolTable {
-	newTable := *t
+	newTable := slices.Clone(*t)
 	return &newTable
 }
 

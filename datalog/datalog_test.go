@@ -468,6 +468,15 @@ func TestSymbolTableClone(t *testing.T) {
 
 	require.Equal(t, &SymbolTable{"a", "b", "c"}, s)
 	require.Equal(t, &SymbolTable{"a", "b", "c", "d", "e"}, s2)
+
+	// Two clones of a table with spare capacity do not write to the same
+	// memory.
+	s3 := s.Clone()
+	s3.Insert("x")
+	s4 := s.Clone()
+	s4.Insert("y")
+	require.Equal(t, &SymbolTable{"a", "b", "c", "x"}, s3)
+	require.Equal(t, &SymbolTable{"a", "b", "c", "y"}, s4)
 }
 
 func TestSetEqual(t *testing.T) {
