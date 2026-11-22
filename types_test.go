@@ -58,6 +58,17 @@ func TestFromDatalogFact(t *testing.T) {
 	require.Equal(t, expectedFact, fact)
 }
 
+// A date of a builder prints in UTC, as the date of a block does, whatever
+// the zone of the Go value.
+func TestDatePrintsUTC(t *testing.T) {
+	zone := time.FixedZone("UTC+2", 2*60*60)
+	date := Date(time.Date(2020, 1, 1, 2, 0, 0, 0, zone))
+	require.Equal(t, "2020-01-01T00:00:00Z", date.String())
+
+	symbols := &datalog.SymbolTable{}
+	require.Equal(t, date.String(), datalog.SymbolDebugger{SymbolTable: symbols}.Term(date.convert(symbols)))
+}
+
 // The builders give the strings their symbols in the order of biscuit-rust,
 // so that the same source gives the same symbol table, and thus the same
 // print of a set of strings: the name of a predicate before its terms, the

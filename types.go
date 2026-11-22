@@ -1174,7 +1174,7 @@ func (a Date) Type() TermType { return TermTypeDate }
 func (a Date) convert(symbols *datalog.SymbolTable) datalog.Term {
 	return datalog.Date(time.Time(a).Unix())
 }
-func (a Date) String() string { return time.Time(a).Format(time.RFC3339) }
+func (a Date) String() string { return time.Time(a).UTC().Format(time.RFC3339) }
 
 type Bytes []byte
 
