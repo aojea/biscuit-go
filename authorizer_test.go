@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/eclipse-biscuit/biscuit-go/v2/datalog"
@@ -121,6 +122,34 @@ func TestPrintWorldSnapshotOrder(t *testing.T) {
 	require.Contains(t, world, `in_authorizer({"c", "b", "a", "d"})`)
 	// The authorizer evaluates with the token first: "d", "a", "b", "c".
 	require.Equal(t, datalog.SymbolTable{"token", "d", "in_token", "a", "b", "c", "authorizer", "in_authorizer"}, *a.(*authorizer).symbols)
+}
+
+// The world prints the rules of the authorizer as soon as they are added,
+// as it does for its facts: before the world is run, and for a rule that
+// is added after a run. Each rule is printed one time.
+func TestPrintWorldRulesBeforeRun(t *testing.T) {
+	publicRoot, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
+	token, err := NewBuilder(privateRoot).Build()
+	require.NoError(t, err)
+	rule := func(name string) Rule {
+		return Rule{
+			Head: Predicate{Name: name, IDs: []Term{Variable("r")}},
+			Body: []Predicate{{Name: "resource", IDs: []Term{Variable("r")}}},
+		}
+	}
+
+	a, err := token.AuthorizerFrom(RootKey(publicRoot))
+	require.NoError(t, err)
+	a.AddFact(Fact{Predicate{Name: "resource", IDs: []Term{String("file1")}}})
+	a.AddRule(rule("first"))
+	a.AddPolicy(DefaultAllowPolicy)
+	require.Equal(t, 1, strings.Count(a.PrintWorld(), "first($r) <- resource($r);"))
+
+	require.NoError(t, a.Authorize())
+	a.AddRule(rule("second"))
+	world := a.PrintWorld()
+	require.Equal(t, 1, strings.Count(world, "first($r) <- resource($r);"))
+	require.Equal(t, 1, strings.Count(world, "second($r) <- resource($r);"))
 }
 
 func TestVerifierDefaultPolicy(t *testing.T) {

@@ -504,7 +504,9 @@ func (v *authorizer) Biscuit() *Biscuit {
 }
 
 // PrintWorld returns the facts and the rules of the world, as source. The
-// facts and the rules of the token are there after Authorize or Query.
+// facts and the rules of the token are there after Authorize or Query. The
+// facts and the rules of the authorizer are there as soon as they are
+// added.
 //
 // A set of strings, and the string keys of a map, print in the order of
 // their symbols. The world is printed with a symbol table of its own, which
@@ -551,12 +553,21 @@ func (v *authorizer) snapshot() (*datalog.SymbolTable, *datalog.World, error) {
 			world.AddFact(group.Origin, fact.convert(symbols))
 		}
 	}
+	loaded := 0
 	for _, r := range v.world.Rules() {
 		rule, err := fromDatalogRule(v.symbols, r.Rule)
 		if err != nil {
 			return nil, nil, err
 		}
 		world.AddRule(r.BlockID, datalog.DefaultTrustedOrigins(), rule.convert(symbols))
+		if r.BlockID == datalog.AuthorizerBlockID {
+			loaded++
+		}
+	}
+	// The world gets the rules of the authorizer when it is run. A rule
+	// that was added after the last run is printed too.
+	for _, rule := range v.rules[min(loaded, len(v.rules)):] {
+		world.AddRule(datalog.AuthorizerBlockID, datalog.DefaultTrustedOrigins(), rule.convert(symbols))
 	}
 	return symbols, world, nil
 }
