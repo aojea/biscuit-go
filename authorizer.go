@@ -55,8 +55,8 @@ type authorizer struct {
 	checks   []Check
 	policies []Policy
 	scopes   []Scope
-	// rules are the rules of the authorizer not yet in the world. They are
-	// added when the world is run, once the scopes they default to are known.
+	// rules are the rules of the authorizer. They are put in the world each
+	// time it is run, once the scopes they default to are known.
 	rules []datalog.Rule
 
 	// blocksByKey maps the public key of a third-party block, as printed
@@ -176,15 +176,17 @@ func (v *authorizer) AddRule(rule Rule) {
 	v.rules = append(v.rules, rule.convert(v.symbols))
 }
 
-// loadRules moves the pending rules of the authorizer to the world. The
-// origins a rule trusts depend on the scopes of the authorizer, which may be
-// added after the rule: they are resolved here, not in AddRule.
+// loadRules puts the rules of the authorizer in the world, in place of the
+// rules of an earlier run: a run starts from the facts the world has and
+// from the rules of the authorizer, and Authorize adds the rules of the
+// token. The origins a rule trusts depend on the scopes of the authorizer,
+// which may be added after the rule: they are resolved here, not in AddRule.
 func (v *authorizer) loadRules() {
+	v.world.ResetRules()
 	defaults := v.authorizerTrustedOrigins()
 	for _, r := range v.rules {
 		v.world.AddRule(datalog.AuthorizerBlockID, v.trustedOrigins(r.Scopes, defaults, datalog.AuthorizerBlockID), r)
 	}
-	v.rules = nil
 }
 
 func (v *authorizer) AddScope(scope Scope) {
@@ -348,7 +350,9 @@ func (v *authorizer) Authorize() error {
 		return fmt.Errorf("biscuit: verification failed: %s", strings.Join(errMsg, ", "))
 	}
 
+	// Reset goes back to the facts of this run, without its rules.
 	v.baseWorld = v.world.Clone()
+	v.baseWorld.ResetRules()
 	v.baseSymbols = v.symbols.Clone()
 
 	if policyMatched {
@@ -555,14 +559,6 @@ func (v *authorizer) SerializePolicies() ([]byte, error) {
 		}
 		protoRules = append(protoRules, protoRule)
 		return nil
-	}
-	for _, br := range v.world.Rules() {
-		if br.BlockID != datalog.AuthorizerBlockID {
-			continue
-		}
-		if err := addRule(br.Rule); err != nil {
-			return nil, err
-		}
 	}
 	for _, rule := range v.rules {
 		if err := addRule(rule); err != nil {

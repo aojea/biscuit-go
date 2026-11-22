@@ -66,6 +66,54 @@ func TestVerifierDefaultPolicy(t *testing.T) {
 	require.NoError(t, v.Authorize())
 }
 
+// An authorizer that is used again runs the rules of the token one time, and
+// Reset removes the rules that were added for the run before it.
+func TestAuthorizerReuse(t *testing.T) {
+	publicRoot, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
+
+	variable := Variable("x")
+	rule := func(head, body string) Rule {
+		return Rule{
+			Head: Predicate{Name: head, IDs: []Term{variable}},
+			Body: []Predicate{{Name: body, IDs: []Term{variable}}},
+		}
+	}
+	builder := NewBuilder(privateRoot)
+	require.NoError(t, builder.AddAuthorityFact(Fact{Predicate{Name: "value", IDs: []Term{Integer(1)}}}))
+	require.NoError(t, builder.AddAuthorityRule(rule("token_rule", "value")))
+	b, err := builder.Build()
+	require.NoError(t, err)
+
+	v, err := b.AuthorizerFrom(RootKey(publicRoot))
+	require.NoError(t, err)
+	rules := func() []string {
+		var res []string
+		for _, r := range v.(*authorizer).world.Rules() {
+			res = append(res, r.Rule.Head.Name.String())
+		}
+		return res
+	}
+	name := func(s string) string {
+		return v.(*authorizer).symbols.Sym(s).String()
+	}
+
+	v.AddRule(rule("first_run", "value"))
+	v.AddPolicy(DefaultAllowPolicy)
+	require.NoError(t, v.Authorize())
+	require.ElementsMatch(t, []string{name("first_run"), name("token_rule")}, rules())
+
+	// A second call does not add the rules again.
+	require.NoError(t, v.Authorize())
+	require.ElementsMatch(t, []string{name("first_run"), name("token_rule")}, rules())
+
+	v.Reset()
+	require.Empty(t, rules())
+	v.AddRule(rule("second_run", "value"))
+	v.AddPolicy(DefaultAllowPolicy)
+	require.NoError(t, v.Authorize())
+	require.ElementsMatch(t, []string{name("second_run"), name("token_rule")}, rules())
+}
+
 func TestVerifierPolicies(t *testing.T) {
 	rng := rand.Reader
 	publicRoot, privateRoot, _ := ed25519.GenerateKey(rng)
