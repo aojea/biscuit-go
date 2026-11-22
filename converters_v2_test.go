@@ -794,3 +794,65 @@ func TestBlockConvertV2(t *testing.T) {
 	_, err = protoBlockToTokenBlock(pbBlock, nil)
 	require.Error(t, err)
 }
+
+// The protobuf library does not check the required fields of a message
+// below a oneof. Unmarshal reads a token before its signatures are checked:
+// it must refuse a block where such a field is missing.
+func TestUnmarshalRejectsMissingRequiredFields(t *testing.T) {
+	expression := func(ops ...*pb.Op) *pb.Block {
+		return &pb.Block{
+			Version: proto.Uint32(MaxSchemaVersion),
+			Checks: []*pb.Check{{Queries: []*pb.Rule{{
+				Head:        &pb.Predicate{Name: proto.Uint64(0)},
+				Expressions: []*pb.Expression{{Ops: ops}},
+			}}}},
+		}
+	}
+	fact := func(term *pb.Term) *pb.Block {
+		return &pb.Block{
+			Version: proto.Uint32(MaxSchemaVersion),
+			Facts:   []*pb.Fact{{Predicate: &pb.Predicate{Name: proto.Uint64(0), Terms: []*pb.Term{term}}}},
+		}
+	}
+	value := &pb.Op{Content: &pb.Op_Value{Value: &pb.Term{Content: &pb.Term_Bool{Bool: true}}}}
+	unary := &pb.Op{Content: &pb.Op_Unary{Unary: &pb.OpUnary{}}}
+	binary := &pb.Op{Content: &pb.Op_Binary{Binary: &pb.OpBinary{}}}
+	integer := &pb.Term{Content: &pb.Term_Integer{Integer: 1}}
+	key := &pb.MapKey{Content: &pb.MapKey_Integer{Integer: 1}}
+	mapOf := func(entries ...*pb.MapEntry) *pb.Term {
+		return &pb.Term{Content: &pb.Term_Map{Map: &pb.Map{Entries: entries}}}
+	}
+
+	for name, block := range map[string]*pb.Block{
+		"unary operation without a kind":  expression(value, unary),
+		"binary operation without a kind": expression(value, value, binary),
+		"operation without content":       expression(value, &pb.Op{}),
+		"operation without a kind in a closure": expression(value, &pb.Op{Content: &pb.Op_Closure{
+			Closure: &pb.OpClosure{Ops: []*pb.Op{value, unary}},
+		}}),
+		"value without content":         expression(&pb.Op{Content: &pb.Op_Value{Value: &pb.Term{}}}),
+		"map entry without a value":     fact(mapOf(&pb.MapEntry{Key: key})),
+		"map entry without a key":       fact(mapOf(&pb.MapEntry{Value: integer})),
+		"map key without content":       fact(mapOf(&pb.MapEntry{Key: &pb.MapKey{}, Value: integer})),
+		"set element without content":   fact(&pb.Term{Content: &pb.Term_Set{Set: &pb.TermSet{Set: []*pb.Term{{}}}}}),
+		"array element without content": fact(&pb.Term{Content: &pb.Term_Array{Array: &pb.Array{Array: []*pb.Term{{}}}}}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			options := proto.MarshalOptions{AllowPartial: true}
+			marshalled, err := options.Marshal(block)
+			require.NoError(t, err)
+			token, err := options.Marshal(&pb.Biscuit{
+				Authority: &pb.SignedBlock{
+					Block:     marshalled,
+					NextKey:   &pb.PublicKey{Algorithm: pb.PublicKey_Ed25519.Enum(), Key: make([]byte, 32)},
+					Signature: make([]byte, 64),
+				},
+				Proof: &pb.Proof{Content: &pb.Proof_NextSecret{NextSecret: make([]byte, 32)}},
+			})
+			require.NoError(t, err)
+
+			require.NotPanics(t, func() { _, err = Unmarshal(token) })
+			require.Error(t, err)
+		})
+	}
+}

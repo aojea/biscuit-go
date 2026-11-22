@@ -178,9 +178,13 @@ func tokenIDToProtoIDV2(input datalog.Term) (*pb.Term, error) {
 	return pbId, nil
 }
 
+// The protobuf library does not check the required fields of a message that
+// is the member of a oneof, or of the messages below it: a term, an
+// operation and a map entry can come without them. The conversions below
+// refuse such a message.
 func protoIDToTokenIDV2(input *pb.Term) (*datalog.Term, error) {
 	var id datalog.Term
-	switch input.Content.(type) {
+	switch input.GetContent().(type) {
 	case *pb.Term_String_:
 		id = datalog.String(input.GetString_())
 	case *pb.Term_Date:
@@ -258,7 +262,7 @@ func protoIDToTokenIDV2(input *pb.Term) (*datalog.Term, error) {
 		}
 		id = datalog.NewMap(entries...)
 	default:
-		return nil, fmt.Errorf("biscuit: failed to convert proto ID to token ID: unsupported id type: %T", input.Content)
+		return nil, fmt.Errorf("biscuit: failed to convert proto ID to token ID: unsupported id type: %T", input.GetContent())
 	}
 
 	return &id, nil
@@ -384,7 +388,7 @@ func tokenExpressionToProtoExpressionV2(input datalog.Expression) (*pb.Expressio
 func protoExpressionToTokenExpressionV2(input *pb.Expression) (datalog.Expression, error) {
 	expr := make(datalog.Expression, len(input.Ops))
 	for i, op := range input.Ops {
-		switch op.Content.(type) {
+		switch op.GetContent().(type) {
 		case *pb.Op_Value:
 			id, err := protoIDToTokenIDV2(op.GetValue())
 			if err != nil {
@@ -415,7 +419,7 @@ func protoExpressionToTokenExpressionV2(input *pb.Expression) (datalog.Expressio
 			}
 			expr[i] = datalog.Closure{Params: params, Body: body}
 		default:
-			return nil, fmt.Errorf("biscuit: unsupported proto expression type: %T", op.Content)
+			return nil, fmt.Errorf("biscuit: unsupported proto expression type: %T", op.GetContent())
 		}
 	}
 	return expr, nil
@@ -443,6 +447,9 @@ func tokenExprUnaryToProtoExprUnary(op datalog.UnaryOp) (*pb.OpUnary, error) {
 }
 
 func protoExprUnaryToTokenExprUnary(op *pb.OpUnary) (datalog.UnaryOpFunc, error) {
+	if op == nil || op.Kind == nil {
+		return nil, errors.New("biscuit: proto OpUnary without a kind")
+	}
 	var unaryOp datalog.UnaryOpFunc
 	switch *op.Kind {
 	case pb.OpUnary_Negate:
@@ -536,6 +543,9 @@ func tokenExprBinaryToProtoExprBinary(op datalog.BinaryOp) (*pb.OpBinary, error)
 }
 
 func protoExprBinaryToTokenExprBinary(op *pb.OpBinary) (datalog.BinaryOpFunc, error) {
+	if op == nil || op.Kind == nil {
+		return nil, errors.New("biscuit: proto OpBinary without a kind")
+	}
 	var binaryOp datalog.BinaryOpFunc
 	switch *op.Kind {
 	case pb.OpBinary_LessThan:
