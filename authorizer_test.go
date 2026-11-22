@@ -268,6 +268,63 @@ func TestAuthorizerQueryLoadsToken(t *testing.T) {
 	require.ElementsMatch(t, []Term{String("file1"), String("file2")}, rights(a))
 }
 
+// The checks and the policies share the time limit of the rules
+// (WithMaxDuration), as in biscuit-rust. A check or a policy with a join
+// that is too long stops with the timeout of the run limits, which is not
+// an execution error: in the authorizer, in the authority block and in a
+// block that is appended to the token.
+func TestAuthorizeTimeLimitOnChecksAndPolicies(t *testing.T) {
+	publicRoot, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
+	// a($x), b($x), c($x) has no match: the join reads each combination of
+	// the facts, which takes much more time than the default limit.
+	const n = 60
+	names := []string{"a", "b", "c"}
+	join := Rule{Head: Predicate{Name: "query"}}
+	for _, name := range names {
+		join.Body = append(join.Body, Predicate{Name: name, IDs: []Term{Variable("x")}})
+	}
+	check := Check{Queries: []Rule{join}}
+	newBuilder := func() Builder {
+		builder := NewBuilder(privateRoot)
+		for i, name := range names {
+			for j := range n {
+				require.NoError(t, builder.AddAuthorityFact(Fact{Predicate{Name: name, IDs: []Term{Integer(i*n + j)}}}))
+			}
+		}
+		return builder
+	}
+	token, err := newBuilder().Build()
+	require.NoError(t, err)
+	builder := newBuilder()
+	require.NoError(t, builder.AddAuthorityCheck(check))
+	withAuthorityCheck, err := builder.Build()
+	require.NoError(t, err)
+	block := token.CreateBlock()
+	require.NoError(t, block.AddCheck(check))
+	withBlockCheck, err := token.Append(rand.Reader, block.Build())
+	require.NoError(t, err)
+
+	for name, testCase := range map[string]struct {
+		token *Biscuit
+		add   func(Authorizer)
+	}{
+		"authorizer check": {token, func(a Authorizer) { a.AddCheck(check) }},
+		"authority check":  {withAuthorityCheck, func(Authorizer) {}},
+		"block check":      {withBlockCheck, func(Authorizer) {}},
+		"policy":           {token, func(a Authorizer) { a.AddPolicy(Policy{Kind: PolicyKindDeny, Queries: check.Queries}) }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, err := testCase.token.AuthorizerFrom(RootKey(publicRoot))
+			require.NoError(t, err)
+			testCase.add(a)
+			a.AddPolicy(DefaultAllowPolicy)
+			err = a.Authorize()
+			require.ErrorIs(t, err, datalog.ErrWorldRunLimitTimeout)
+			require.NotErrorIs(t, err, ErrExecution)
+		})
+	}
+}
+
 // biscuit-rust gives the symbols of the facts of the authorizer before those
 // of its rules, also when a rule is added first. The order of the symbols
 // is the order in which a check reads facts that have strings.

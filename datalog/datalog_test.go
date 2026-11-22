@@ -806,7 +806,8 @@ func TestExpressionStringIsTemporary(t *testing.T) {
 			{Value{Variable(0)}, UnaryOp{TypeOf{}}, Value{x}, BinaryOp{NotEqual{}}},
 		},
 	}
-	w := NewWorld()
+	// The test reads the clock of the machine: it has a long time limit.
+	w := NewWorld(WithMaxDuration(time.Minute))
 	w.AddFact(testOrigin, Fact{Predicate{value, []Term{x}}})
 	w.AddFact(testOrigin, Fact{Predicate{value, []Term{y}}})
 	w.AddRule(0, testTrusted, rule)
@@ -1070,6 +1071,74 @@ func TestWorldRunTimeoutMidRun(t *testing.T) {
 	require.ErrorIs(t, w.Run(syms), ErrWorldRunLimitTimeout)
 	// Exposes a race condition under -race if Run left a goroutine still writing facts.
 	_ = len(w.Facts())
+}
+
+// The rules, the checks and the policies of an authorization share one time
+// limit, as in biscuit-rust: QueryMatch and QueryMatchAll have the time
+// that is left of the last Run. Without it a check with a join, which a
+// block of a token can have, has no limit.
+func TestWorldQueryMatchTimeLimit(t *testing.T) {
+	syms := &SymbolTable{}
+	// a($x), b($x), c($x) has no match: the join reads each combination of
+	// the facts.
+	const n = 20
+	join := Rule{Head: Predicate{syms.Insert("q"), nil}}
+	w := NewWorld()
+	for i, name := range []String{syms.Insert("a"), syms.Insert("b"), syms.Insert("c")} {
+		join.Body = append(join.Body, Predicate{name, []Term{Variable(0)}})
+		for j := range n {
+			w.AddFact(testOrigin, Fact{Predicate{name, []Term{Integer(i*n + j)}}})
+		}
+	}
+	start := time.Unix(0, 0)
+	polls := 0
+	// expireAfter makes the clock go past the time limit after n readings.
+	expireAfter := func(n int) {
+		polls = 0
+		w.clock = func() time.Time {
+			if polls++; polls > n {
+				return start.Add(time.Hour)
+			}
+			return start
+		}
+	}
+
+	// A world that was not run has no time limit.
+	expireAfter(0)
+	matched, err := w.QueryMatch(join, testTrusted, syms)
+	require.NoError(t, err)
+	require.False(t, matched)
+
+	// The time limit starts with Run. The join reads the clock as it does
+	// work.
+	w.clock = func() time.Time { return start }
+	require.NoError(t, w.Run(syms))
+	expireAfter(2)
+	_, err = w.QueryMatch(join, testTrusted, syms)
+	require.ErrorIs(t, err, ErrWorldRunLimitTimeout)
+	require.Equal(t, 3, polls)
+	expireAfter(2)
+	_, err = w.QueryMatchAll(join, testTrusted, syms)
+	require.ErrorIs(t, err, ErrWorldRunLimitTimeout)
+	require.Equal(t, 3, polls)
+
+	// A query that does little work does not read the clock: a moment in
+	// which the process does not run must not fail a small authorization.
+	expireAfter(0)
+	small := Rule{Head: join.Head, Body: []Predicate{{join.Body[0].Name, []Term{Integer(0)}}}}
+	matched, err = w.QueryMatch(small, testTrusted, syms)
+	require.NoError(t, err)
+	require.True(t, matched)
+	require.Equal(t, 0, polls)
+	_, err = w.QueryMatch(join, testTrusted, syms)
+	require.ErrorIs(t, err, ErrWorldRunLimitTimeout)
+	require.Equal(t, 1, polls)
+
+	// With time left, the query reads all the combinations.
+	w.clock = func() time.Time { return start }
+	matched, err = w.QueryMatch(join, testTrusted, syms)
+	require.NoError(t, err)
+	require.False(t, matched)
 }
 
 // A timeout must leave the world exactly as some completed iteration left it,

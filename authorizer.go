@@ -307,9 +307,9 @@ func (v *authorizer) AddPolicy(policy Policy) {
 // authorizerOrigin is the origin of the facts the authorizer adds itself.
 var authorizerOrigin = datalog.NewOrigin(datalog.AuthorizerBlockID)
 
-// runError wraps an error of the expressions of a rule in ErrExecution, as
-// for the expressions of a check or a policy. The run limits are not errors
-// of an expression.
+// runError wraps an error of the expressions of a rule, a check or a policy
+// in ErrExecution. The run limits are not errors of an expression: the
+// rules, the checks and the policies share the time limit of the world.
 func runError(err error) error {
 	switch {
 	case errors.Is(err, datalog.ErrWorldRunLimitMaxFacts),
@@ -339,7 +339,7 @@ func (v *authorizer) Authorize() error {
 		c := check.convert(v.symbols)
 		successful, err := v.checkPasses(c, datalog.AuthorizerBlockID, authorizerTrusted)
 		if err != nil {
-			return fmt.Errorf("%w: %w", ErrExecution, err)
+			return runError(err)
 		}
 		if !successful {
 			errs = append(errs, fmt.Errorf("failed to verify check #%d: %s", i, debug.Check(c)))
@@ -355,7 +355,7 @@ func (v *authorizer) Authorize() error {
 
 		successful, err := v.checkPasses(c, 0, blockTrusted[0])
 		if err != nil {
-			return fmt.Errorf("%w: %w", ErrExecution, err)
+			return runError(err)
 		}
 		if !successful {
 			errs = append(errs, fmt.Errorf("failed to verify block 0 check #%d: %s", i, debug.Check(c)))
@@ -372,7 +372,7 @@ func (v *authorizer) Authorize() error {
 			q := query.convert(v.symbols)
 			matched, err := v.world.QueryMatch(q, v.trustedOrigins(q.Scopes, authorizerTrusted, datalog.AuthorizerBlockID), v.symbols)
 			if err != nil {
-				return fmt.Errorf("%w: %w", ErrExecution, err)
+				return runError(err)
 			}
 			if matched {
 				switch policy.Kind {
@@ -399,7 +399,7 @@ func (v *authorizer) Authorize() error {
 
 			successful, err := v.checkPasses(c, blockID, blockTrusted[blockID])
 			if err != nil {
-				return fmt.Errorf("%w: %w", ErrExecution, err)
+				return runError(err)
 			}
 			if !successful {
 				errs = append(errs, fmt.Errorf("failed to verify block #%d check #%d: %s", blockID, j, debug.Check(c)))

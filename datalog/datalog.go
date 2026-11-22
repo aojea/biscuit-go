@@ -393,7 +393,7 @@ const (
 	tupleCost = 32
 )
 
-// tick is a no-op on a nil budget, so QueryRule and QueryMatchAll pay only the nil check.
+// tick is a no-op on a nil budget, so a query without a time limit pays only the nil check.
 func (b *runBudget) tick(work int) error {
 	if b == nil {
 		return nil
@@ -440,6 +440,9 @@ func WithMaxIterations(maxIterations int) WorldOption {
 	}
 }
 
+// WithMaxDuration sets the time limit of Run. QueryMatch and QueryMatchAll
+// have the time that is left of the last Run: the rules, the checks and the
+// policies of an authorization share one time limit, as in biscuit-rust.
 func WithMaxDuration(maxDuration time.Duration) WorldOption {
 	return func(w *World) {
 		w.runLimits.maxDuration = maxDuration
@@ -475,7 +478,11 @@ type World struct {
 	rules   []scopedRule
 
 	runLimits runLimits
-	externs   ExternFuncs
+	// deadline is the time limit of the last Run, which QueryMatch and
+	// QueryMatchAll share. timed is false until the world is run.
+	deadline time.Time
+	timed    bool
+	externs  ExternFuncs
 	// clock is read by the run limits; nil means time.Now and tests inject a fake one
 	clock func() time.Time
 }
@@ -625,8 +632,13 @@ func (w *World) now() time.Time {
 // The limits on the iterations and on the facts apply to an iteration that
 // generated facts, as in biscuit-rust: a world that is already complete is
 // not an error, however many facts it has.
+//
+// The time limit starts here. QueryMatch and QueryMatchAll, which the
+// authorizer calls after Run for its checks and its policies, have the
+// time that is left of it.
 func (w *World) Run(syms *SymbolTable) error {
 	deadline := w.now().Add(w.runLimits.maxDuration)
+	w.deadline, w.timed = deadline, true
 	budget := &runBudget{now: w.now, deadline: deadline, left: budgetCheckEvery}
 	for i := 1; ; i++ {
 		// Checked here as well so the limit applies to a world without rules.
@@ -729,10 +741,14 @@ func (w *World) QueryRule(rule Rule, blockID BlockID, trusted TrustedOrigins, sy
 // match, as in biscuit-rust, where a binding that cannot make the head is
 // dropped. Its expressions are evaluated all the same. Only a token that is
 // not made by a builder has a query with such a head.
+//
+// After a Run, the query has the time that is left of the time limit of
+// that Run: it returns ErrWorldRunLimitTimeout when its join is still at
+// work after it. A world that was not run has no time limit.
 func (w *World) QueryMatch(rule Rule, trusted TrustedOrigins, syms *SymbolTable) (bool, error) {
 	headBound := rule.Validate() == nil
 	found := false
-	err := combine(rule.variables(), rule.Body, w.candidates(trusted), nil, func(res match) (bool, error) {
+	err := combine(rule.variables(), rule.Body, w.candidates(trusted), w.queryBudget(), func(res match) (bool, error) {
 		ok, err := holds(rule.Expressions, res.vars, syms, w.externs)
 		if err != nil {
 			return false, err
@@ -749,10 +765,10 @@ func (w *World) QueryMatch(rule Rule, trusted TrustedOrigins, syms *SymbolTable)
 // QueryMatchAll reports whether the body of the rule matches at least once
 // in the facts of the trusted origins and its expressions hold for every
 // match (the semantics of `check all`). It stops at the first match whose
-// expressions do not hold.
+// expressions do not hold. It has the time limit of QueryMatch.
 func (w *World) QueryMatchAll(rule Rule, trusted TrustedOrigins, syms *SymbolTable) (bool, error) {
 	found, all := false, true
-	err := combine(rule.variables(), rule.Body, w.candidates(trusted), nil, func(res match) (bool, error) {
+	err := combine(rule.variables(), rule.Body, w.candidates(trusted), w.queryBudget(), func(res match) (bool, error) {
 		found = true
 		ok, err := holds(rule.Expressions, res.vars, syms, w.externs)
 		if err != nil {
@@ -765,6 +781,23 @@ func (w *World) QueryMatchAll(rule Rule, trusted TrustedOrigins, syms *SymbolTab
 		return false, err
 	}
 	return found && all, nil
+}
+
+// queryBudget returns the time that a query of a check or a policy has: what
+// is left of the time limit of the last Run. The rules, the checks and the
+// policies of an authorization share one time limit, as in biscuit-rust.
+//
+// The clock is read as the join does work, and not when the query starts: a
+// query that does little work never reads it. The limit is there to stop a
+// join that is too long. An authorization with small queries must not fail
+// because the process did not run for a moment between two of them.
+//
+// Each query has a budget of its own, so that it does not change the world.
+func (w *World) queryBudget() *runBudget {
+	if !w.timed {
+		return nil
+	}
+	return &runBudget{now: w.now, deadline: w.deadline, left: budgetCheckEvery}
 }
 
 func (w *World) Clone() *World {
