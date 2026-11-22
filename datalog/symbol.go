@@ -177,6 +177,15 @@ type SymbolDebugger struct {
 	*SymbolTable
 }
 
+// Quote writes a string as datalog source: between quotes, with a backslash
+// before a quote and before a backslash. The parser gives the same string
+// back.
+func Quote(s string) string {
+	return `"` + stringEscaper.Replace(s) + `"`
+}
+
+var stringEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+
 // Term prints a term, resolving strings and variables through the symbol
 // table, including inside sets. The elements of a set are in the order of
 // biscuit-rust: integers by value, strings by their index in the symbol
@@ -184,7 +193,7 @@ type SymbolDebugger struct {
 func (d SymbolDebugger) Term(t Term) string {
 	switch t := t.(type) {
 	case String:
-		return "\"" + d.Str(t) + "\""
+		return Quote(d.Str(t))
 	case Variable:
 		return "$" + d.Var(t)
 	case Set:

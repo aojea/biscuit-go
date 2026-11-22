@@ -1165,7 +1165,8 @@ func (a String) Type() TermType { return TermTypeString }
 func (a String) convert(symbols *datalog.SymbolTable) datalog.Term {
 	return datalog.String(symbols.Insert(string(a)))
 }
-func (a String) String() string { return fmt.Sprintf("%q", string(a)) }
+
+func (a String) String() string { return datalog.Quote(string(a)) }
 
 type Date time.Time
 

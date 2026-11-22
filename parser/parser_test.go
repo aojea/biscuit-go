@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/eclipse-biscuit/biscuit-go/v2"
+	"github.com/eclipse-biscuit/biscuit-go/v2/datalog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -667,6 +668,27 @@ func TestParseStringEscapes(t *testing.T) {
 	for _, input := range []string{"\"a\\\nb\"", `"abc\"`, `"abc`} {
 		_, err := p.Fact(`f(`+input+`)`, nil)
 		require.Error(t, err, input)
+	}
+}
+
+// The printers write a string as source: the parser gives the same string
+// back, also when it has a quote or a backslash. biscuit-rust prints such a
+// string as it is, and its source then parses to something else, or not at
+// all.
+func TestPrintedStringParses(t *testing.T) {
+	p := New()
+	for _, s := range []string{`abc`, `a"b`, `a\b`, `\`, `"`, `\"`, `\n`, "a\nb", `^\d+\.\w+$`, `é"`, `a", "b`, `hex:00`} {
+		fact := biscuit.Fact{Predicate: biscuit.Predicate{Name: "f", IDs: []biscuit.Term{biscuit.String(s)}}}
+
+		parsed, err := p.Fact(fact.String(), nil)
+		require.NoError(t, err, s)
+		require.Equal(t, fact, parsed, s)
+
+		syms := &datalog.SymbolTable{}
+		printed := datalog.SymbolDebugger{SymbolTable: syms}.Term(syms.Insert(s))
+		parsed, err = p.Fact("f("+printed+")", nil)
+		require.NoError(t, err, s)
+		require.Equal(t, fact, parsed, s)
 	}
 }
 
