@@ -522,6 +522,11 @@ func (b *Biscuit) authorizerFor(root stdcrypto.PublicKey, opts ...AuthorizerOpti
 // the final signature must verify with it.
 func (b *Biscuit) verifySignatures(root crypto.Verifier) error {
 	authority := b.container.GetAuthority()
+	// Unmarshal checks the size of the other signatures; the key that signs
+	// the authority block is only known here.
+	if root.Algorithm() == pb.PublicKey_Ed25519 && len(authority.GetSignature()) != ed25519.SignatureSize {
+		return ErrInvalidSignatureSize
+	}
 	if err := root.Verify(blockSignaturePayload(authority, nil), authority.GetSignature()); err != nil {
 		return err
 	}

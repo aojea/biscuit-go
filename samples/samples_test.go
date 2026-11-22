@@ -321,7 +321,12 @@ func CompareResult(root_key ed25519.PublicKey, filename string, token biscuit.Bi
 func CompareError(authorization_error error, sample_error *BiscuitError, t *testing.T) {
 	error_string := authorization_error.Error()
 	if sample_error.Format != nil {
-		require.Equal(t, error_string, "biscuit: invalid signature")
+		// The size of a signature is checked before the signature.
+		if sample_error.Format.BlockSignatureDeserializationError != nil {
+			require.ErrorIs(t, authorization_error, biscuit.ErrInvalidSignatureSize)
+		} else {
+			require.Equal(t, error_string, "biscuit: invalid signature")
+		}
 	} else if sample_error.FailedLogic != nil {
 		if sample_error.FailedLogic.Unauthorized != nil {
 			// todo check the block and check ids (if there is a single failed check, because the lib only reports one)

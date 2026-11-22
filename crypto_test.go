@@ -13,6 +13,7 @@ import (
 	"github.com/eclipse-biscuit/biscuit-go/v2/internal/crypto"
 	"github.com/eclipse-biscuit/biscuit-go/v2/pb"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 )
 
 // A token built from an ECDSA root key, appended, sealed and verified.
@@ -56,9 +57,73 @@ func TestBiscuitSecp256r1(t *testing.T) {
 	_, err = b2deser.AuthorizerFrom(RootKey(&otherRoot.PublicKey))
 	require.ErrorIs(t, err, ErrInvalidSignature)
 
+	// An ECDSA signature does not have the size of an Ed25519 signature.
 	edPub, _, _ := ed25519.GenerateKey(rand.Reader)
 	_, err = b2deser.AuthorizerFrom(RootKey(edPub))
-	require.ErrorIs(t, err, ErrInvalidSignature)
+	require.ErrorIs(t, err, ErrInvalidSignatureSize)
+}
+
+// The key that signs a block is the next key of the block before it, or the
+// root key: it can use another algorithm than the next key of the block.
+// biscuit-rust makes such tokens: the blocks it appends have an Ed25519 key,
+// also when the root key is ECDSA.
+func TestUnmarshalMixedAlgorithms(t *testing.T) {
+	privateRoot, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	rootSigner, err := crypto.NewSigner(privateRoot)
+	require.NoError(t, err)
+	_, edPrivate, _ := ed25519.GenerateKey(rand.Reader)
+	edSigner, err := crypto.NewSigner(edPrivate)
+	require.NoError(t, err)
+
+	block, err := proto.Marshal(&pb.Block{Version: proto.Uint32(MinSchemaVersion)})
+	require.NoError(t, err)
+
+	// sign makes a token with one block signed by signer, with a next key of
+	// the other algorithm.
+	sign := func(signer crypto.Signer, next pb.PublicKey_Algorithm) *pb.Biscuit {
+		signed, proof, err := signBlock(signer, next, block, MinSchemaVersion, nil, nil, rand.Reader)
+		require.NoError(t, err)
+		return &pb.Biscuit{Authority: signed, Proof: proof}
+	}
+	unmarshal := func(container *pb.Biscuit) (*Biscuit, error) {
+		serialized, err := proto.Marshal(container)
+		require.NoError(t, err)
+		return Unmarshal(serialized)
+	}
+
+	t.Run("ECDSA root key, Ed25519 next key", func(t *testing.T) {
+		token, err := unmarshal(sign(rootSigner, pb.PublicKey_Ed25519))
+		require.NoError(t, err)
+		_, err = token.AuthorizerFrom(RootKey(&privateRoot.PublicKey))
+		require.NoError(t, err)
+
+		// The Ed25519 next key signs the block after it, and a signature of
+		// that key has a fixed size.
+		appended, err := token.Append(rand.Reader, token.CreateBlock().Build())
+		require.NoError(t, err)
+		_, err = unmarshal(appended.container)
+		require.NoError(t, err)
+		appended.container.Blocks[0].Signature = appended.container.Blocks[0].Signature[:63]
+		_, err = unmarshal(appended.container)
+		require.ErrorIs(t, err, ErrInvalidSignatureSize)
+	})
+
+	t.Run("Ed25519 root key, ECDSA next key", func(t *testing.T) {
+		container := sign(edSigner, pb.PublicKey_SECP256R1)
+		token, err := unmarshal(container)
+		require.NoError(t, err)
+		_, err = token.AuthorizerFrom(RootKey(edPrivate.Public()))
+		require.NoError(t, err)
+
+		// The root key is not known when the token is read: the size of the
+		// signature of the authority block is checked with the signature.
+		container.Authority.Signature = container.Authority.Signature[:63]
+		token, err = unmarshal(container)
+		require.NoError(t, err)
+		_, err = token.AuthorizerFrom(RootKey(edPrivate.Public()))
+		require.ErrorIs(t, err, ErrInvalidSignatureSize)
+	})
 }
 
 // Ed25519-only tokens keep the v0 payload, so they are byte compatible with

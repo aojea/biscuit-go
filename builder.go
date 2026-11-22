@@ -197,7 +197,7 @@ func (u *Unmarshaler) Unmarshal(serialized []byte) (*Biscuit, error) {
 		return nil, err
 	}
 
-	if err := checkSignedBlockFormat(container.Authority, true); err != nil {
+	if err := checkSignedBlockFormat(container.Authority, nil); err != nil {
 		return nil, err
 	}
 
@@ -224,10 +224,12 @@ func (u *Unmarshaler) Unmarshal(serialized []byte) (*Biscuit, error) {
 	}
 
 	blocks := make([]*Block, len(container.Blocks))
+	signedBy := container.Authority.GetNextKey()
 	for i, sb := range container.Blocks {
-		if err := checkSignedBlockFormat(sb, false); err != nil {
+		if err := checkSignedBlockFormat(sb, signedBy); err != nil {
 			return nil, err
 		}
+		signedBy = sb.GetNextKey()
 
 		pbBlock := new(pb.Block)
 		if err := proto.Unmarshal(sb.Block, pbBlock); err != nil {
@@ -399,15 +401,20 @@ func (b *blockBuilder) Build() *Block {
 }
 
 // checkSignedBlockFormat rejects a block that no key can make valid, before
-// any verification: a next key or signature that cannot be the encoding of
-// its algorithm (Ed25519 has fixed sizes; ECDSA signatures are DER and only
-// the key is checked), an unknown signature payload version, or an external
-// signature where the spec does not allow one.
-func checkSignedBlockFormat(sb *pb.SignedBlock, authority bool) error {
+// any verification: a next key that cannot be the encoding of its algorithm,
+// a signature that signedBy cannot have made (an Ed25519 signature has a
+// fixed size; an ECDSA signature is DER and is not checked here), an unknown
+// signature payload version, or an external signature where the spec does
+// not allow one.
+//
+// signedBy is the key that signs the block: the next key of the block before
+// it. It is nil for the authority block, which the root key signs: that key
+// is only known when the token is verified.
+func checkSignedBlockFormat(sb *pb.SignedBlock, signedBy *pb.PublicKey) error {
 	if _, err := crypto.ParseVerifier(sb.GetNextKey().GetAlgorithm(), sb.GetNextKey().GetKey()); err != nil {
 		return err
 	}
-	if sb.GetNextKey().GetAlgorithm() == pb.PublicKey_Ed25519 && len(sb.GetSignature()) != ed25519.SignatureSize {
+	if signedBy != nil && signedBy.GetAlgorithm() == pb.PublicKey_Ed25519 && len(sb.GetSignature()) != ed25519.SignatureSize {
 		return ErrInvalidSignatureSize
 	}
 	switch sb.GetVersion() {
@@ -419,7 +426,7 @@ func checkSignedBlockFormat(sb *pb.SignedBlock, authority bool) error {
 		// The spec binds an external signature to its token through the
 		// signature of the previous block: the authority block has none,
 		// and only version 1 payloads include it.
-		if authority {
+		if signedBy == nil {
 			return errors.New("biscuit: the authority block cannot carry an external signature")
 		}
 		if sb.GetVersion() != signatureVersionV1 {
