@@ -844,10 +844,11 @@ func TestBinaryRegex(t *testing.T) {
 			expectedErr: true,
 		},
 		{
-			desc:        "invalid regexp",
-			left:        syms.Insert("abc"),
-			right:       syms.Insert("[abc"),
-			expectedErr: true,
+			// as in biscuit-rust, not an error
+			desc:  "invalid regexp matches nothing",
+			left:  syms.Insert("[abc"),
+			right: syms.Insert("[abc"),
+			res:   false,
 		},
 	}
 

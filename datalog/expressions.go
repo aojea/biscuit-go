@@ -884,7 +884,8 @@ func (Suffix) Eval(left Term, right Term, symbols *SymbolTable) (Term, error) {
 }
 
 // Regex returns true when the right string is a regexp and left matches against it.
-// left and right must be String.
+// left and right must be String. A right string that is not a valid regexp
+// matches nothing: the result is false and not an error, as in biscuit-rust.
 type Regex struct{}
 
 func (Regex) Type() BinaryOpType {
@@ -902,9 +903,9 @@ func (Regex) Eval(left Term, right Term, symbols *SymbolTable) (Term, error) {
 
 	re, err := regexp.Compile(symbols.Str(sright))
 	if err != nil {
-		return nil, fmt.Errorf("datalog: invalid regex: %q: %v", right, err)
+		return Bool(false), nil
 	}
-	return Bool(re.Match([]byte(symbols.Str(sleft)))), nil
+	return Bool(re.MatchString(symbols.Str(sleft))), nil
 }
 
 // Add performs the addition of left + right and returns the result.
