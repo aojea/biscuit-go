@@ -489,6 +489,52 @@ func TestBuilderKeepsDuplicateFact(t *testing.T) {
 	require.NoError(t, a.Authorize())
 }
 
+// Build does not change the builder, and the token does not share the
+// content of the builder: Build can be called again, also after an error
+// or after more content is added, and each token can be read.
+func TestBuildAgain(t *testing.T) {
+	_, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
+	// The strings are not in the default symbol table: each block
+	// declares its own.
+	fact := func(value string) Fact {
+		return Fact{Predicate{Name: "likes", IDs: []Term{String(value)}}}
+	}
+	read := func(token *Biscuit) string {
+		serialized, err := token.Serialize()
+		require.NoError(t, err)
+		token, err = Unmarshal(serialized)
+		require.NoError(t, err)
+		return token.String()
+	}
+
+	builder := NewBuilder(privateRoot)
+	require.NoError(t, builder.AddAuthorityFact(fact("alice")))
+	builder.SetContext("\xff")
+	_, err := builder.Build()
+	require.Error(t, err)
+	builder.SetContext("first")
+	first, err := builder.Build()
+	require.NoError(t, err)
+	printed := first.String()
+	require.Equal(t, printed, read(first))
+
+	require.NoError(t, builder.AddAuthorityFact(fact("bob")))
+	second, err := builder.Build()
+	require.NoError(t, err)
+	require.Contains(t, read(second), `likes("bob")`)
+	require.Equal(t, printed, first.String())
+
+	block := first.CreateBlock()
+	require.NoError(t, block.AddFact(fact("carol")))
+	block.SetContext("\xff")
+	_, err = first.Append(rand.Reader, block.Build())
+	require.Error(t, err)
+	block.SetContext("block")
+	appended, err := first.Append(rand.Reader, block.Build())
+	require.NoError(t, err)
+	require.Contains(t, read(appended), `likes("carol")`)
+}
+
 // A rule whose head has a variable that its body does not bind cannot
 // generate a fact. The builders refuse it, and the authorizer refuses a
 // token that has one, also when the rule matches nothing, as biscuit-rust

@@ -166,18 +166,26 @@ func (b *builderOptions) Build() (*Biscuit, error) {
 	if v := b.rootKeyID; v != nil {
 		opts = append(opts, WithRootKeyID(*v))
 	}
+	// Build does not change the builder, and the token does not share its
+	// content: Build can be called again, also after an error or after
+	// more content is added.
+	symbols := b.symbols.Clone()
+	facts := slices.Clone(*b.facts)
+	rules := slices.Clone(b.rules)
+	checks := slices.Clone(b.checks)
+	scopes := slices.Clone(b.scopes)
 	return newBiscuit(
 		b.rootKey,
-		b.symbols,
+		symbols,
 		&Block{
-			symbols:    b.symbols.SplitOff(b.symbolsStart),
-			facts:      b.facts,
-			rules:      b.rules,
-			checks:     b.checks,
-			scopes:     b.scopes,
-			publicKeys: scopeKeys(b.scopes, b.rules, b.checks),
+			symbols:    symbols.SplitOff(b.symbolsStart),
+			facts:      &facts,
+			rules:      rules,
+			checks:     checks,
+			scopes:     scopes,
+			publicKeys: scopeKeys(scopes, rules, checks),
 			context:    b.context,
-			version:    schemaVersion(*b.facts, b.scopes, b.rules, b.checks),
+			version:    schemaVersion(facts, scopes, rules, checks),
 		},
 		opts...)
 }
@@ -310,7 +318,7 @@ func NewBlockBuilder(baseSymbols *datalog.SymbolTable) BlockBuilder {
 func newBlockBuilder(baseSymbols *datalog.SymbolTable, publicKeys publicKeyTable) BlockBuilder {
 	return &blockBuilder{
 		symbolsStart: baseSymbols.Len(),
-		symbols:      baseSymbols,
+		symbols:      baseSymbols.Clone(),
 		publicKeys:   publicKeys,
 		facts:        new(datalog.FactSet),
 	}
@@ -373,7 +381,9 @@ func (b *blockBuilder) SetContext(context string) {
 }
 
 func (b *blockBuilder) Build() *Block {
-	b.symbols = b.symbols.SplitOff(b.symbolsStart)
+	// Build does not change the builder: it can be called again, also
+	// after Append returned an error.
+	symbols := b.symbols.Clone().SplitOff(b.symbolsStart)
 
 	facts := make(datalog.FactSet, len(*b.facts))
 	copy(facts, *b.facts)
@@ -393,7 +403,7 @@ func (b *blockBuilder) Build() *Block {
 	}
 
 	return &Block{
-		symbols:    b.symbols.Clone(),
+		symbols:    symbols,
 		facts:      &facts,
 		rules:      rules,
 		checks:     checks,
