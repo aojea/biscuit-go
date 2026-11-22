@@ -388,6 +388,44 @@ func TestAuthorizeExecutionError(t *testing.T) {
 	}
 }
 
+// A check and a policy stop at their first match: an expression that would
+// fail on a fact after it is not evaluated.
+func TestAuthorizeStopsAtFirstMatch(t *testing.T) {
+	publicRoot, privateRoot, _ := ed25519.GenerateKey(rand.Reader)
+	token, err := NewBuilder(privateRoot).Build()
+	require.NoError(t, err)
+
+	// value($x), 10 / $x > 4
+	query := []Rule{{
+		Head: Predicate{Name: "query"},
+		Body: []Predicate{{Name: "value", IDs: []Term{Variable("x")}}},
+		Expressions: []Expression{{
+			Value{Integer(10)}, Value{Variable("x")}, BinaryDiv, Value{Integer(4)}, BinaryGreaterThan,
+		}},
+	}}
+	authorize := func(values []int64, add func(Authorizer)) error {
+		ab, err := token.AuthorizerFrom(RootKey(publicRoot))
+		require.NoError(t, err)
+		for _, v := range values {
+			ab.AddFact(Fact{Predicate{Name: "value", IDs: []Term{Integer(v)}}})
+		}
+		add(ab)
+		ab.AddPolicy(DefaultAllowPolicy)
+		return ab.Authorize()
+	}
+	check := func(kind CheckKind) func(Authorizer) {
+		return func(a Authorizer) { a.AddCheck(Check{Kind: kind, Queries: query}) }
+	}
+
+	require.NoError(t, authorize([]int64{1, 0}, check(CheckKindOne)))
+	require.ErrorIs(t, authorize([]int64{0, 1}, check(CheckKindOne)), datalog.ErrExprDivByZero)
+	require.ErrorContains(t, authorize([]int64{1, 0}, check(CheckKindReject)), "reject if")
+	require.ErrorContains(t, authorize([]int64{5, 0}, check(CheckKindAll)), "check all")
+	require.NoError(t, authorize([]int64{1, 0}, func(a Authorizer) {
+		a.AddPolicy(Policy{Kind: PolicyKindAllow, Queries: query})
+	}))
+}
+
 // reject if passes when its query has no match; a block with one is v6.
 func TestBiscuitRejectIf(t *testing.T) {
 	publicRoot, privateRoot, _ := ed25519.GenerateKey(rand.Reader)

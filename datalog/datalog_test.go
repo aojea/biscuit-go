@@ -682,6 +682,55 @@ func TestWorldQueryMatchAll(t *testing.T) {
 	require.False(t, got)
 }
 
+// A check and a policy need one match: the facts after the first match are
+// not read, so an expression that fails on one of them does not stop the
+// authorization. `check all` stops at the first match that does not hold. A
+// query and a rule read all the facts.
+func TestWorldQueryStopsAtFirstMatch(t *testing.T) {
+	syms := &SymbolTable{}
+	value := syms.Insert("value")
+	// value($x), 10 / $x > 4: true for 1 and 2, false for 5, an error for 0.
+	rule := Rule{
+		Head: Predicate{syms.Insert("ok"), []Term{Variable(0)}},
+		Body: []Predicate{{value, []Term{Variable(0)}}},
+		Expressions: []Expression{{
+			Value{Integer(10)}, Value{Variable(0)}, BinaryOp{Div{}},
+			Value{Integer(4)}, BinaryOp{GreaterThan{}},
+		}},
+	}
+	world := func(values ...Integer) *World {
+		w := NewWorld()
+		for _, v := range values {
+			w.AddFact(testOrigin, Fact{Predicate{value, []Term{v}}})
+		}
+		return w
+	}
+
+	matched, err := world(1, 0).QueryMatch(rule, testTrusted, syms)
+	require.NoError(t, err)
+	require.True(t, matched)
+	_, err = world(0, 1).QueryMatch(rule, testTrusted, syms)
+	require.ErrorIs(t, err, ErrExprDivByZero)
+	matched, err = world(5).QueryMatch(rule, testTrusted, syms)
+	require.NoError(t, err)
+	require.False(t, matched)
+
+	all, err := world(1, 5, 0).QueryMatchAll(rule, testTrusted, syms)
+	require.NoError(t, err)
+	require.False(t, all)
+	_, err = world(1, 0, 5).QueryMatchAll(rule, testTrusted, syms)
+	require.ErrorIs(t, err, ErrExprDivByZero)
+	all, err = world(1, 2).QueryMatchAll(rule, testTrusted, syms)
+	require.NoError(t, err)
+	require.True(t, all)
+
+	_, err = world(1, 0).QueryRule(rule, 0, testTrusted, syms)
+	require.ErrorIs(t, err, ErrExprDivByZero)
+	facts, err := world(1, 5, 2).QueryRule(rule, 0, testTrusted, syms)
+	require.NoError(t, err)
+	require.Len(t, *facts, 2)
+}
+
 func TestWorldQueryBytesAndSetTerms(t *testing.T) {
 	w := NewWorld()
 	syms := &SymbolTable{}

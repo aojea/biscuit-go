@@ -263,12 +263,12 @@ func (r Rule) variables() MatchedVariables {
 // the block the rule belongs to. It returns ErrWorldRunLimitTimeout once the
 // budget's deadline passes. A nil budget disables the limit.
 func (r Rule) apply(blockID BlockID, facts []factWithOrigin, syms *SymbolTable, externs ExternFuncs, budget *runBudget, emit func(Origin, Fact)) error {
-	matches, err := combine(r.variables(), r.Body, r.Expressions, facts, syms, externs, budget)
-	if err != nil {
-		return err
-	}
+	return combine(r.variables(), r.Body, facts, budget, func(res match) (bool, error) {
+		ok, err := holds(r.Expressions, res.vars, syms, externs)
+		if err != nil || !ok {
+			return true, err
+		}
 
-	for _, res := range matches {
 		predicate := r.Head.Clone()
 		for i, term := range predicate.Terms {
 			k, ok := term.(Variable)
@@ -277,7 +277,7 @@ func (r Rule) apply(blockID BlockID, facts []factWithOrigin, syms *SymbolTable, 
 			}
 			v, ok := res.vars[k]
 			if !ok {
-				return InvalidRuleError{r, k}
+				return false, InvalidRuleError{r, k}
 			}
 
 			predicate.Terms[i] = *v
@@ -285,12 +285,11 @@ func (r Rule) apply(blockID BlockID, facts []factWithOrigin, syms *SymbolTable, 
 		// emit does not scan for duplicates, Run pays for that when it merges;
 		// building the fact and its origin is charged like a binding
 		if err := budget.tick(tupleCost); err != nil {
-			return err
+			return false, err
 		}
 		emit(res.origin.With(blockID), Fact{predicate})
-	}
-
-	return nil
+		return true, nil
+	})
 }
 
 // CheckKind selects how the queries of a Check are evaluated.
@@ -654,28 +653,46 @@ func (w *World) QueryRule(rule Rule, blockID BlockID, trusted TrustedOrigins, sy
 	return newFacts, nil
 }
 
-// QueryMatchAll reports whether the body of the rule matches at least once
-// in the facts of the trusted origins and its expressions hold for every
-// match (the semantics of `check all`).
-func (w *World) QueryMatchAll(rule Rule, trusted TrustedOrigins, syms *SymbolTable) (bool, error) {
-	// The expressions are evaluated here rather than passed to combine, which
-	// would filter the matches instead of reporting those that fail.
-	matches, err := combine(rule.variables(), rule.Body, nil, w.visibleFacts(trusted), syms, w.externs, nil)
+// QueryMatch reports whether the rule has a match in the facts of the
+// trusted origins: its body matches and its expressions hold. It stops at
+// the first match, as the specification asks for the queries of a check or
+// a policy: the facts after it are not read, so an expression that would
+// fail on one of them does not.
+func (w *World) QueryMatch(rule Rule, trusted TrustedOrigins, syms *SymbolTable) (bool, error) {
+	found := false
+	err := combine(rule.variables(), rule.Body, w.visibleFacts(trusted), nil, func(res match) (bool, error) {
+		ok, err := holds(rule.Expressions, res.vars, syms, w.externs)
+		if err != nil {
+			return false, err
+		}
+		found = ok
+		return !found, nil
+	})
 	if err != nil {
 		return false, err
 	}
-	for _, res := range matches {
-		for _, e := range rule.Expressions {
-			v, err := e.EvaluateWith(res.vars, syms, w.externs)
-			if err != nil {
-				return false, err
-			}
-			if !v.Equal(Bool(true)) {
-				return false, nil
-			}
+	return found, nil
+}
+
+// QueryMatchAll reports whether the body of the rule matches at least once
+// in the facts of the trusted origins and its expressions hold for every
+// match (the semantics of `check all`). It stops at the first match whose
+// expressions do not hold.
+func (w *World) QueryMatchAll(rule Rule, trusted TrustedOrigins, syms *SymbolTable) (bool, error) {
+	found, all := false, true
+	err := combine(rule.variables(), rule.Body, w.visibleFacts(trusted), nil, func(res match) (bool, error) {
+		found = true
+		ok, err := holds(rule.Expressions, res.vars, syms, w.externs)
+		if err != nil {
+			return false, err
 		}
+		all = ok
+		return all, nil
+	})
+	if err != nil {
+		return false, err
 	}
-	return len(matches) > 0, nil
+	return found && all, nil
 }
 
 func (w *World) Clone() *World {
@@ -726,25 +743,22 @@ type match struct {
 }
 
 // combine enumerates the bindings of variables for which every predicate
-// matches a fact and every expression holds. The first expression error
-// stops the enumeration and is returned.
+// matches a fact, in the order of the facts, and calls yield for each. yield
+// returns false to stop the enumeration: a check needs one binding, not all
+// of them. The expressions of the rule are for yield to evaluate.
 func combine(
 	variables MatchedVariables,
 	predicates []Predicate,
-	expressions []Expression,
 	facts []factWithOrigin,
-	syms *SymbolTable,
-	externs ExternFuncs,
 	budget *runBudget,
-) ([]match, error) {
-	var res []match
-
+	yield func(match) (bool, error),
+) error {
 	current := 0
 	indexes := make([]int, len(predicates))
 
 	// cannot apply a rule on an empty list of facts
 	if len(predicates) > 0 && len(facts) == 0 {
-		return nil, nil
+		return nil
 	}
 
 	// main loop
@@ -758,29 +772,29 @@ func combine(
 			for {
 				if facts[indexes[current]].fact.Match(predicates[current]) {
 					if current == len(predicates)-1 {
-						// extract and check variables, check expressions, send variables
+						// extract and check variables, send variables
 						break
 					} else {
 						current += 1
 						// a descent starts a scan of at most |facts| steps; ticking
 						// them here keeps the check out of the inner loop
 						if err := budget.tick(len(facts)); err != nil {
-							return nil, err
+							return err
 						}
 					}
 				} else {
 					// did not match, we either increase the current index or the previous one
 					// then we check again for a match
 					if !advanceIndexes(&current, &indexes, len(facts)) {
-						return res, nil
+						return nil
 					}
 				}
 			}
 		}
 
-		// extract and check variables, check expressions, send variables
+		// extract and check variables, send variables
 		if err := budget.tick(tupleCost); err != nil {
-			return nil, err
+			return err
 		}
 		var vars = variables.Clone()
 		var origin Origin
@@ -807,41 +821,48 @@ func combine(
 		}
 
 		if matching {
-			if complete_vars := vars.Complete(); complete_vars != nil {
-				valid := true
-				for _, e := range expressions {
-					r, err := e.EvaluateWith(complete_vars, syms, externs)
-					if err != nil {
-						return nil, err
-					}
-					if !r.Equal(Bool(true)) {
-						valid = false
-						break
-					}
-				}
-
-				if valid {
-					res = append(res, match{origin, complete_vars})
-				}
-			} else {
+			complete_vars := vars.Complete()
+			if complete_vars == nil {
 				// if all predicates match but variables are not complete, it means
 				// variables appearing in the head do not appear in the body,
 				// so we should stop here because there's no way to get a correct match
-				return res, nil
+				return nil
+			}
+			more, err := yield(match{origin, complete_vars})
+			if err != nil {
+				return err
+			}
+			if !more {
+				return nil
 			}
 		}
 
 		// this was a rule or check with expressions but no predicates, no need to
 		// update the indexes, an single execution is enough
 		if len(predicates) == 0 {
-			return res, nil
+			return nil
 		}
 
 		// next index
 		if !advanceIndexes(&current, &indexes, len(facts)) {
-			return res, nil
+			return nil
 		}
 	}
+}
+
+// holds evaluates the expressions of a rule for one binding, in order, up to
+// the first one that is not true.
+func holds(expressions []Expression, vars map[Variable]*Term, syms *SymbolTable, externs ExternFuncs) (bool, error) {
+	for _, e := range expressions {
+		res, err := e.EvaluateWith(vars, syms, externs)
+		if err != nil {
+			return false, err
+		}
+		if !res.Equal(Bool(true)) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func advanceIndexes(current *int, indexes *[]int, factCount int) bool {

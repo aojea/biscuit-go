@@ -304,11 +304,11 @@ func (v *authorizer) Authorize() error {
 		}
 		for _, query := range policy.Queries {
 			q := query.convert(v.symbols)
-			res, err := v.world.QueryRule(q, datalog.AuthorizerBlockID, v.trustedOrigins(q.Scopes, authorizerTrusted, datalog.AuthorizerBlockID), v.symbols)
+			matched, err := v.world.QueryMatch(q, v.trustedOrigins(q.Scopes, authorizerTrusted, datalog.AuthorizerBlockID), v.symbols)
 			if err != nil {
 				return fmt.Errorf("%w: %w", ErrExecution, err)
 			}
-			if len(*res) != 0 {
+			if matched {
 				switch policy.Kind {
 				case PolicyKindAllow:
 					policyResult = nil
@@ -379,19 +379,19 @@ func (v *authorizer) checkPasses(c datalog.Check, blockID datalog.BlockID, defau
 				return true, nil
 			}
 		case datalog.CheckKindReject:
-			res, err := v.world.QueryRule(query, blockID, trusted, v.symbols)
+			matched, err := v.world.QueryMatch(query, trusted, v.symbols)
 			if err != nil {
 				return false, err
 			}
-			if len(*res) != 0 {
+			if matched {
 				return false, nil
 			}
 		default:
-			res, err := v.world.QueryRule(query, blockID, trusted, v.symbols)
+			matched, err := v.world.QueryMatch(query, trusted, v.symbols)
 			if err != nil {
 				return false, err
 			}
-			if len(*res) != 0 {
+			if matched {
 				return true, nil
 			}
 		}
